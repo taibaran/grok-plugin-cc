@@ -24,7 +24,7 @@ import { readConfig } from "./lib/state.mjs";
 import { which, classifyAuthBlob, grokBaseArgs, cleanGrokEnv } from "./lib/grok.mjs";
 import { captureDiff } from "./lib/git.mjs";
 import { buildStopGatePrompt } from "./lib/prompts.mjs";
-import { parseVerdict } from "./lib/verdict.mjs";
+import { parseVerdict, findBalancedJsonEnd } from "./lib/verdict.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { sanitizeForTerminal } from "./lib/render.mjs";
 
@@ -106,20 +106,45 @@ function safeUnlink(p) {
   try { fs.unlinkSync(p); } catch {}
 }
 
-// Strip ANSI / OSC / DCS / C0 noise before attempting JSON parse. Grok can
-// leak colored tracing lines into stdout under some terminal configurations;
-// JSON.parse rejects any non-JSON prefix, and a silent parse failure here
-// flips the gate to fail-open ("allow"). Sanitize first to match how
-// companion.mjs::parseGrokJson handles the same envelope shape.
+// Extract Grok's `--output-format json` envelope from raw stdout.
+//
+// Two layers of defense:
+//   1. ANSI / OSC / DCS / C0 stripping (`sanitizeForTerminal`). Grok can
+//      leak colored tracing lines into stdout under some terminal
+//      configurations; JSON.parse rejects any non-JSON prefix, and a
+//      silent parse failure flips the gate to fail-open ("allow").
+//   2. LAST-balanced-object extraction. We do NOT call `JSON.parse(clean)`
+//      on the whole blob — Grok's stdout often contains streaming `thought`
+//      text BEFORE the final envelope, and (after the v0.3.0 round-2 fix
+//      to `readBoundedStdout`) we may even be looking at a tail that starts
+//      mid-string. The envelope is by contract the FINAL JSON object Grok
+//      emits, so we scan for ALL balanced JSON objects and return the
+//      last one that parses cleanly. This defends against:
+//        - prefix noise (tracing lines, thought streams)
+//        - mid-string starts (tail reads)
+//        - any model-emitted-JSON-before-the-final-envelope
 function parseGrokJsonEnvelope(raw) {
   if (!raw) return null;
   const clean = sanitizeForTerminal(raw).trim();
   if (!clean) return null;
+  // Fast path: the common case is the whole blob IS the envelope, no noise.
   try {
     const parsed = JSON.parse(clean);
     if (parsed && typeof parsed === "object") return parsed;
   } catch {}
-  return null;
+  // Slow path: scan for the last balanced JSON object in the cleaned blob.
+  let last = null;
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] !== "{") continue;
+    const end = findBalancedJsonEnd(clean, i);
+    if (end < 0) continue;
+    try {
+      const parsed = JSON.parse(clean.slice(i, end + 1));
+      if (parsed && typeof parsed === "object") last = parsed;
+    } catch {}
+    i = end;
+  }
+  return last;
 }
 
 // Same temp-file pattern as the prompt file. The grok stdout could be
@@ -151,22 +176,32 @@ const MAX_GATE_STDOUT_PARSE_BYTES = 8 * 1024 * 1024;
 // error message.
 const MAX_GATE_STDERR_BUF = 256 * 1024;
 
+// Read up to MAX_GATE_STDOUT_PARSE_BYTES of the stdout temp file, taking the
+// TAIL of the file when it is larger than the cap.
+//
+// Why the tail and not the head: Grok streams its `thought` field before
+// the final JSON envelope, so the verdict-bearing object is at the END of
+// stdout. The old "read first 8 MiB" design dropped the envelope entirely
+// for any run that wedged > 8 MiB of thinking text before it — exactly the
+// pathological runs the gate is supposed to catch.
+//
+// Reading the tail can land mid-string (the cut point isn't necessarily a
+// JSON boundary). parseGrokJsonEnvelope handles this by scanning for the
+// LAST balanced JSON object in the read buffer rather than parsing the
+// whole thing as one blob, so a partial JSON prefix at the start of the
+// tail does not break the verdict extraction.
 function readBoundedStdout(filePath) {
   let stat;
   try { stat = fs.statSync(filePath); }
   catch { return ""; }
-  // Truncate explicitly — reading the first N bytes of a too-large file is
-  // better than refusing entirely. The verdict envelope is at the END of
-  // the file, but if a runaway Grok wedged 2 GB of thinking before that
-  // we cannot recover the verdict anyway; surfacing the truncated prefix
-  // for diagnostics is the least-bad option.
+  if (stat.size === 0) return "";
   const size = Math.min(stat.size, MAX_GATE_STDOUT_PARSE_BYTES);
-  if (size === 0) return "";
+  const position = Math.max(0, stat.size - size);
   const buf = Buffer.alloc(size);
   let fd;
   try {
     fd = fs.openSync(filePath, "r");
-    fs.readSync(fd, buf, 0, size, 0);
+    fs.readSync(fd, buf, 0, size, position);
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch {}

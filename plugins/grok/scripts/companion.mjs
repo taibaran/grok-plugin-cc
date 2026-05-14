@@ -598,6 +598,116 @@ async function cmdReview({ flags, positional }, { adversarial }) {
   process.exit(0);
 }
 
+// ---------- subcommand: imagine / imagine-video ----------
+
+// Default per-call deadlines for media generation. Image generation is fast
+// (~5-30s); video generation routinely takes a minute or two. Override via
+// --timeout; pass --timeout 0 to disable.
+const DEFAULT_IMAGE_TIMEOUT_MS = 5 * 60 * 1000;    // 5 min
+const DEFAULT_VIDEO_TIMEOUT_MS = 15 * 60 * 1000;   // 15 min
+
+// Extract the saved image / video path from Grok's response text. Grok's
+// /imagine and /imagine-video builtins respond with markdown of the shape
+// `![alt](/absolute/path/to/file.ext)`. We pull out the URL portion so the
+// user gets a direct path they can `open` (macOS), `xdg-open` (Linux), or
+// drag into a chat. Falls back to the raw text if the markdown shape isn't
+// matched — Grok occasionally returns extra prose for safety/refusal cases.
+function extractMediaPath(text) {
+  if (typeof text !== "string") return null;
+  const m = text.match(/!\[[^\]]*\]\(([^)]+)\)/);
+  if (m && m[1]) return m[1];
+  return null;
+}
+
+async function cmdImagine({ flags, positional }, { video }) {
+  const description = positional.join(" ").trim();
+  if (!description) {
+    console.error(`Usage: ${video ? "imagine-video" : "imagine"} <description>`);
+    process.exit(2);
+  }
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+
+  // Reject obvious shell-injection patterns in the description before
+  // shipping it to a child process. Grok's /imagine takes a prompt, not a
+  // command, but we still defense-in-depth against newlines that could
+  // truncate or stack additional headless directives.
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(description)) {
+    console.error("Description contains control bytes; refusing to forward to Grok.");
+    process.exit(2);
+  }
+
+  const slashCommand = video ? "/imagine-video" : "/imagine";
+  const defaultMs = video ? DEFAULT_VIDEO_TIMEOUT_MS : DEFAULT_IMAGE_TIMEOUT_MS;
+  const timeoutMs = resolveTimeoutMs(flags.timeout, defaultMs);
+  const effort = validateEffort(flags.effort);
+
+  // We do NOT use grokBaseArgs here. /imagine is a builtin "shell"
+  // command, not an agentic task — it doesn't run tools, so the
+  // --permission-mode plan + --disallowed-tools layer is unnecessary, and
+  // forcing JSON output is what gives us a parseable response.
+  const prompt = `${slashCommand} ${description}`;
+  const args = [
+    "-p", prompt,
+    "--output-format", "json",
+    "-m", effectiveModel(flags.model),
+    "--max-turns", "10"
+  ];
+  if (effort) args.push("--effort", effort);
+
+  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+
+  const r = spawnSync("grok", args, spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] ${video ? "imagine-video" : "imagine"} timed out after ${timeoutMs}ms. Re-run with --timeout 0 to disable, or pick a longer duration.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
+
+  const parsed = parseGrokJson(r.stdout || "");
+  if (parsed.kind === "error") {
+    const why = classifyAuthBlob(parsed.message);
+    process.stderr.write(`Grok error: ${parsed.message}\n`);
+    if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
+    process.exit(1);
+  }
+  if (parsed.kind !== "text") {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.exit(r.status ?? 1);
+  }
+
+  if (flags.json) {
+    process.stdout.write(JSON.stringify({
+      kind: video ? "video" : "image",
+      description,
+      path: extractMediaPath(parsed.text),
+      sessionId: parsed.sessionId || null,
+      raw: parsed.text
+    }, null, 2) + "\n");
+    process.exit(0);
+  }
+
+  const mediaPath = extractMediaPath(parsed.text);
+  if (mediaPath) {
+    const noun = video ? "Video" : "Image";
+    process.stdout.write(`${noun}: ${mediaPath}\n`);
+    process.stdout.write(`\nOpen with:\n  open "${mediaPath}"\n`);
+    if (parsed.sessionId) {
+      process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: grok -r ${parsed.sessionId})\n`);
+    }
+  } else {
+    // No markdown link in the response — surface the raw text so the user
+    // can see the model's refusal or content-policy explanation.
+    process.stdout.write(parsed.text + "\n");
+  }
+  process.exit(0);
+}
+
 // ---------- subcommand: task ----------
 
 async function cmdTask({ flags, positional }) {
@@ -821,7 +931,7 @@ function cmdPurge({ flags }) {
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|task|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
@@ -836,6 +946,8 @@ async function main() {
     case "ask": return cmdAsk(args);
     case "review": return await cmdReview(args, { adversarial: false });
     case "adversarial-review": return await cmdReview(args, { adversarial: true });
+    case "imagine": return await cmdImagine(args, { video: false });
+    case "imagine-video": return await cmdImagine(args, { video: true });
     case "task": return await cmdTask(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
@@ -843,7 +955,7 @@ async function main() {
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|task|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

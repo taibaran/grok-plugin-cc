@@ -59,11 +59,42 @@ prints `Grok plugin is ready.`, you can use any of the commands below.
 | `/grok:ask <question>` | Ask Grok a one-off question (read-only). |
 | `/grok:review` | Review uncommitted changes (working-tree, staged, or branch diff). Foreground or background. |
 | `/grok:adversarial-review` | Like `/grok:review`, but the prompt tells Grok to challenge the design and surface failure modes. |
+| `/grok:imagine <description>` | Generate an image from text using Grok Imagine. Returns the saved file path. |
+| `/grok:imagine-video <description>` | Generate a video from text using Grok Imagine. Returns the saved file path. |
 | `/grok:rescue <task>` | Delegate investigation, debugging, or a substantial task to Grok via the `grok-rescue` subagent. |
 | `/grok:status [job-id] [--all]` | List active and recent Grok jobs in this workspace. |
 | `/grok:result [job-id]` | Show the stored output of a finished job — including the underlying Grok `sessionId` for resumption. |
 | `/grok:cancel [job-id]` | Cancel an active background job. |
 | `/grok:purge [--older-than 30d]` | Delete recorded job metadata + log files from disk. |
+
+## Example: image and video generation
+
+Grok ships builtin `/imagine` and `/imagine-video` commands that this plugin
+surfaces directly:
+
+```
+/grok:imagine a tiny red apple on a white plate
+```
+
+```
+Image: /Users/you/.grok/sessions/<encoded-cwd>/<session>/images/1.jpg
+
+Open with:
+  open "/Users/you/.grok/sessions/<encoded-cwd>/<session>/images/1.jpg"
+
+Session: 019e2841-...  (resume: grok -r 019e2841-...)
+```
+
+The image (or video, for `/grok:imagine-video`) is saved under
+`~/.grok/sessions/<encoded-cwd>/<session-id>/images/` and the path is
+printed. The plugin does not move or copy the file — `open` (macOS) or
+`xdg-open` (Linux) opens it in the default viewer. Pass `--json` to get a
+parseable `{kind, description, path, sessionId, raw}` envelope instead of
+the friendly text format.
+
+Default timeouts are 5 minutes for images, 15 minutes for video; override
+with `--timeout 30m` or `--timeout 0` (disable). Content-policy refusals
+come through as plain text (no markdown link) so you can see Grok's reason.
 
 ## Example: review vs. adversarial-review
 

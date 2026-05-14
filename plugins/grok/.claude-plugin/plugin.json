@@ -1,7 +1,7 @@
 {
   "name": "grok",
-  "version": "0.1.0",
-  "description": "Use xAI Grok from Claude Code to ask questions, review code, or delegate tasks. Wraps the local `grok` CLI.",
+  "version": "0.2.0",
+  "description": "Use xAI Grok from Claude Code to ask questions, review code, generate images and videos via Grok Imagine, or delegate tasks. Wraps the local `grok` CLI.",
   "author": {
     "name": "taibaran"
   }

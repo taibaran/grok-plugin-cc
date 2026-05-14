@@ -5,6 +5,27 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-14
+
+### Added
+
+- `/grok:imagine <description>` and `/grok:imagine-video <description>` —
+  surface Grok's builtin Media Generation slash commands (documented in
+  `~/.grok/docs/user-guide/04-slash-commands.md`) through the plugin's
+  headless flow. The companion runs `grok -p "/imagine <desc>" --output-format json`,
+  parses the markdown image/video link out of the response, and prints
+  the saved file path plus an `open "<path>"` line. Defaults: 5 min
+  timeout for images, 15 min for video. `--json` flag returns a parseable
+  `{kind, description, path, sessionId, raw}` envelope instead of the
+  friendly text format. Control bytes in the description are rejected at
+  the dispatcher layer for defense-in-depth.
+
+### Tests
+
+- 6 new tests in `tests/imagine.test.mjs` (dispatcher wiring, usage errors,
+  control-byte refusal) and the dispatcher-coverage check now requires
+  `imagine` and `imagine-video` in `main()`. 94 tests total, all passing.
+
 ## [0.1.0] - 2026-05-14
 
 Initial release. Wraps the xAI Grok CLI (`grok` binary, headless `-p`)

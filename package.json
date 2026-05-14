@@ -1,7 +1,7 @@
 {
   "name": "grok-plugin-cc",
-  "version": "0.1.0",
-  "description": "Claude Code plugin to call xAI Grok for ask, review, and long-form rescue. Tests use Node's built-in test runner — no external dev dependencies.",
+  "version": "0.2.0",
+  "description": "Claude Code plugin to call xAI Grok for ask, review, image/video generation, and long-form rescue. Tests use Node's built-in test runner — no external dev dependencies.",
   "private": true,
   "type": "module",
   "scripts": {

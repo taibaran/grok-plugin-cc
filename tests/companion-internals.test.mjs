@@ -84,7 +84,19 @@ test("companion.mjs declares all the documented subcommands in main()", () => {
   // subcommand into main()'s switch, the command silently 404s at runtime.
   // Smoke-check the dispatcher recognizes every documented subcommand.
   const source = fs.readFileSync(COMPANION_PATH, "utf8");
-  for (const sub of ["setup", "ask", "review", "adversarial-review", "task", "status", "result", "cancel", "purge"]) {
+  for (const sub of [
+    "setup",
+    "ask",
+    "review",
+    "adversarial-review",
+    "imagine",
+    "imagine-video",
+    "task",
+    "status",
+    "result",
+    "cancel",
+    "purge"
+  ]) {
     assert.match(source, new RegExp(`case\\s+"${sub}"\\s*:`),
       `main() must handle subcommand "${sub}"`);
   }

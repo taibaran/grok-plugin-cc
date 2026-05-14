@@ -244,10 +244,15 @@ export function detectAuthSource() {
 //
 // sessionId chains the call into a named session for multi-turn use; without
 // it the headless run is one-shot.
-export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessionId } = {}) {
+//
+// cwd is threaded into effectiveModel so workspace-scoped activeModel (set
+// by /grok:setup's fallback chain) resolves against the user's actual
+// workspace and not whatever cwd the hook process happens to inherit from
+// Claude Code. Optional — defaults to process.cwd() inside effectiveModel.
+export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessionId, cwd } = {}) {
   const args = [
     "--output-format", jsonOutput ? "json" : "plain",
-    "-m", effectiveModel(model)
+    "-m", effectiveModel(model, cwd)
   ];
   if (readOnly) {
     args.push("--permission-mode", "plan");

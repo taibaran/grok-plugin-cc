@@ -149,8 +149,11 @@ function main() {
   const MAX_HOOK_BUF = 256 * 1024;
 
   // Request JSON output to make the verdict shape robust; max-turns guards
-  // against runaway agent loops chewing through the hook budget.
-  const args = ["--prompt-file", promptFile, ...grokBaseArgs({ readOnly: true, jsonOutput: true }), "--max-turns", "20"];
+  // against runaway agent loops chewing through the hook budget. Thread the
+  // hook's cwd into the arg builder so workspace-scoped model overrides
+  // resolve against the actual project, not whatever cwd Claude Code spawned
+  // this hook from.
+  const args = ["--prompt-file", promptFile, ...grokBaseArgs({ readOnly: true, jsonOutput: true, cwd }), "--max-turns", "20"];
 
   const proc = spawn("grok", args, {
     stdio: ["ignore", "pipe", "pipe"],

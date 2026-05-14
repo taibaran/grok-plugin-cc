@@ -39,8 +39,10 @@ const ALLOWED_ENV_KEYS = new Set([
   "GROK_MODELS_BASE_URL",
   "GROK_MODELS_LIST_URL",
   "GROK_AUTH_PROVIDER_COMMAND",
+  "GROK_AUTH_PROVIDER_LABEL",       // TUI label override for external auth
   "GROK_AUTH_TOKEN_TTL",
   "GROK_AUTH_EARLY_INVALIDATION_SECS",
+  "GROK_AUTH_EXPIRED",              // set by Grok itself when re-running the auth provider
   "GROK_OIDC_ISSUER",
   "GROK_OIDC_CLIENT_ID",
   "GROK_HOME",                      // overrides ~/.grok config dir
@@ -48,9 +50,11 @@ const ALLOWED_ENV_KEYS = new Set([
   "GROK_MEMORY",                    // 0/1
   "GROK_WEB_FETCH",                 // 0/1
   "GROK_WEB_FETCH_PROXY",
+  "GROK_WEB_SEARCH_MODEL",          // overrides the model used by web_search tool
   "GROK_AGENT",                     // custom agent definition path
   "GROK_RESPECT_GITIGNORE",         // 0/1
   "GROK_FEEDBACK_ENABLED",
+  "GROK_DISABLE_TELEMETRY",         // explicit telemetry kill switch
   "GROK_DEPLOYMENT_KEY",
   "GROK_LOG_FILE",
   "GROK_LOG_FILTER",
@@ -92,9 +96,12 @@ export function cleanGrokEnv(parent = process.env) {
 // if Grok flips the default later. Override per-call with --model, or globally
 // via GROK_PLUGIN_MODEL.
 export const DEFAULT_MODEL = "grok-build";
-// Reserved for future expansion when more public models ship. Today it is a
-// singleton — but the code path that walks it for setup-time probing handles
-// the multi-entry case correctly.
+// Fallback chain. Today there is only one public model, so this is a
+// singleton — meaning `probeWithFallback` cannot actually fall back. Kept as
+// a single-entry array (not removed entirely) so that when xAI ships
+// additional public models we can add them without changing the public
+// surface or the setup-report shape. The setup report's `fallbackUsed`
+// field stays meaningful: null today, populated when a real fallback fires.
 export const MODEL_FALLBACK_CHAIN = ["grok-build"];
 
 // Minimum xAI Grok CLI version we have validated against. Bump only when a
@@ -173,6 +180,13 @@ export function capabilityProbe() {
   // `--always-approve` as equivalent aliases; we look for the help-visible
   // name and use `--yolo` in actual invocations (matches the README's
   // examples and is shorter).
+  //
+  // `--cwd` is intentionally NOT in the required list even though grok
+  // exposes it. The plugin does not pass `--cwd` to the child — we use
+  // `spawn(..., { cwd })` instead, which is the canonical way to set the
+  // working directory of a Node child process. Listing `--cwd` as required
+  // would let a future grok release that drops the flag falsely break
+  // /grok:setup over a capability we never depended on.
   const required = [
     "-p, --single",
     "-m, --model",
@@ -181,7 +195,6 @@ export function capabilityProbe() {
     "--permission-mode",
     "--max-turns",
     "--disallowed-tools",
-    "--cwd",
     "--prompt-file"
   ];
   const missing = required.filter(token => !help.includes(token));
@@ -309,16 +322,29 @@ export function authProbe(model) {
   return { ok: false, detail: why || "probe failed", raw: blob.slice(0, 400), model: model || effectiveModel() };
 }
 
-// Walk the fallback chain only if the user has not pinned a model and the
-// failure is a recognized "model unavailable" error. For any other failure
-// the user's stated/default model is what they get — walking the chain on
-// e.g. auth-rejected would just produce N copies of the same failure.
+// Walk the fallback chain only if the user has not pinned a model AND the
+// failure looks like one that another model might fix:
+//   - "model unavailable"  — this specific model is not enabled for the
+//                            account; another model in the chain might be.
+//   - "quota exhausted"    — per-model quotas exist; another model may have
+//                            headroom even if this one is throttled.
+// For other failure classes (no auth method, auth rejected) walking the
+// chain just produces N copies of the same error — skip it.
+//
+// Today the chain is a single entry (only `grok-build` is publicly exposed),
+// so this function effectively returns the first probe result. When xAI
+// ships more public models, the fallback semantics kick in automatically.
+const FALLBACK_TRIGGER_DETAILS = new Set([
+  "model unavailable",
+  "quota exhausted"
+]);
+
 export function probeWithFallback() {
   const userPinned = !!process.env.GROK_PLUGIN_MODEL;
   const first = authProbe();
   if (first.ok) return { ...first, fallbackUsed: null };
   if (userPinned) return { ...first, fallbackUsed: null };
-  if (first.detail !== "model unavailable") return { ...first, fallbackUsed: null };
+  if (!FALLBACK_TRIGGER_DETAILS.has(first.detail)) return { ...first, fallbackUsed: null };
   for (const candidate of MODEL_FALLBACK_CHAIN) {
     if (candidate === first.model) continue;
     const r = authProbe(candidate);

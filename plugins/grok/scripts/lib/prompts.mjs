@@ -50,17 +50,18 @@ export function buildReviewPrompt({ adversarial, focus, target, jsonOutput, diff
     const schema = loadSchema("review-output");
     template = `OUTPUT_FORMAT=json\nReturn ONLY a JSON object that validates against the following schema:\n${schema}\n\n${template}`;
   }
-  // The diff is included inline because Grok's headless mode (-p) reads the
-  // entire prompt from the command line / a file; it does not consume stdin
-  // the way Gemini does. The diff is wrapped in <repository_context> by the
-  // template. Escape only user-controlled fields; the diff is not escaped
-  // because it is treated as data inside <repository_context>, and the
-  // <output_contract> in the template instructs the model to treat the
-  // contents as data, not directives.
+  // EVERY user/repo-controlled value gets escaped, INCLUDING the diff. The
+  // template wraps `REVIEW_INPUT` inside `<repository_context>...` tags; an
+  // unescaped diff containing the literal sequence `</repository_context>`
+  // (or any other prompt-structure tag) lets a malicious commit break out of
+  // its container and inject system-prompt-grade instructions. The prompt's
+  // <output_contract> tells the model to treat contents as data, but escaping
+  // is the load-bearing defense — the contract is a hint, the escape is what
+  // makes the injection structurally impossible.
   return renderTemplate(template, {
     TARGET_LABEL: escapeXmlInTrustedBlock(target || "working tree"),
     USER_FOCUS: escapeXmlInTrustedBlock(focus || "(none)"),
-    REVIEW_INPUT: diff || "(no diff captured)",
+    REVIEW_INPUT: escapeXmlInTrustedBlock(diff || "(no diff captured)"),
     REVIEW_COLLECTION_GUIDANCE: ""
   });
 }
@@ -73,8 +74,10 @@ export function buildStopGatePrompt({ claudeResponse, diff }) {
   const block = safe
     ? `<claude_response>\n${safe}\n</claude_response>`
     : "<claude_response>\n(no transcript snippet provided — inspect repo state directly)\n</claude_response>";
+  // Same rationale as buildReviewPrompt: the diff is repo-controlled and a
+  // malicious commit can plant `</diff>` to escape the wrapper. Escape it.
   return renderTemplate(t, {
     CLAUDE_RESPONSE_BLOCK: block,
-    DIFF_BLOCK: diff || "(no diff captured)"
+    DIFF_BLOCK: escapeXmlInTrustedBlock(diff || "(no diff captured)")
   });
 }

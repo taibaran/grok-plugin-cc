@@ -246,10 +246,19 @@ function cmdSetup({ flags }) {
 //   error:   { type: "error", message }
 // Returns { kind: "text" | "error" | "unknown", text, message, sessionId } where
 // unknown means the payload could not be parsed as either shape.
+//
+// We strip ANSI / OSC / DCS / C0 controls before parsing. Grok normally
+// emits clean JSON on stdout, but its Rust tracing layer can leak colored
+// log lines under certain conditions (e.g. TERM=xterm-256color while
+// emitting json). JSON.parse throws on any non-JSON prefix, so a single
+// stray escape sequence would silently flip an error envelope to "unknown"
+// — which the close handler then treats as a generic exit-0 success.
 function parseGrokJson(raw) {
   if (!raw) return { kind: "unknown" };
+  const clean = sanitizeForTerminal(raw).trim();
+  if (!clean) return { kind: "unknown" };
   try {
-    const parsed = JSON.parse(raw.trim());
+    const parsed = JSON.parse(clean);
     if (parsed && typeof parsed === "object") {
       if (parsed.type === "error") {
         return { kind: "error", message: parsed.message || "" };
@@ -625,18 +634,22 @@ async function cmdImagine({ flags, positional }, { video }) {
     console.error(`Usage: ${video ? "imagine-video" : "imagine"} <description>`);
     process.exit(2);
   }
-  if (!which("grok")) {
-    console.error("Grok CLI not installed. Run `/grok:setup`.");
-    process.exit(127);
-  }
 
-  // Reject obvious shell-injection patterns in the description before
-  // shipping it to a child process. Grok's /imagine takes a prompt, not a
-  // command, but we still defense-in-depth against newlines that could
-  // truncate or stack additional headless directives.
+  // Reject obvious shell-injection patterns in the description BEFORE the
+  // binary check. The control-byte refusal is a policy decision about the
+  // input, not about whether Grok is reachable. If we deferred this until
+  // after `which` succeeded, a CI runner without grok would mask the
+  // refusal with a generic "not installed" error — confusing for the user
+  // (which problem are they fixing?) and surprising for the test matrix
+  // (test outcome depends on the host's installed CLIs).
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(description)) {
     console.error("Description contains control bytes; refusing to forward to Grok.");
     process.exit(2);
+  }
+
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
   }
 
   const slashCommand = video ? "/imagine-video" : "/imagine";
@@ -775,14 +788,14 @@ async function cmdTask({ flags, positional }) {
   }
 
   process.stdout.write(`\n\n[grok-plugin] Job ${meta.id} ${meta.status} (exit ${result.code}).\n`);
-  // sessionId only ends up on meta.session_id when the underlying invocation
-  // used JSON output and we parsed the envelope. `task` uses plain output for
-  // streaming UX, so this footer only fires when the user passed a named
-  // --session-id (we record it as requested_session_id; the runtime then uses
-  // that exact name as the session handle).
-  const sessionLabel = meta.session_id || meta.requested_session_id;
-  if (sessionLabel) {
-    process.stdout.write(`[grok-plugin] Session: ${sessionLabel}  (resume: grok -r ${sessionLabel})\n`);
+  // Only surface a Session footer when the user explicitly named a session
+  // via `--session-id`. The implicit `meta.session_id` from a parsed JSON
+  // envelope is unreliable for `task`: this subcommand uses plain output
+  // for streaming UX, so parseGrokJson returns "unknown" and never records
+  // a sessionId. Showing a half-truth footer ("Session: <id>") that the
+  // user can't actually `grok -r <id>` is worse than no footer at all.
+  if (meta.requested_session_id) {
+    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: grok -r ${meta.requested_session_id})\n`);
   }
   process.stdout.write(`[grok-plugin] /grok:result ${meta.id}\n`);
   if (result.timedOut) process.exit(EXIT_TIMEOUT);

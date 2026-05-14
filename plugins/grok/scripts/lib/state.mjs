@@ -142,40 +142,45 @@ export function pruneJobs(cwd) {
 // could make /grok:result read any user-readable file. Returns the resolved
 // path on success, or null if the path resolves outside jobsDir.
 //
-// Implementation note: a plain `path.resolve` + string equality check is
-// unreliable on case-insensitive filesystems (macOS APFS/HFS+ default) and
-// when symlinks are involved — `/Users/...` and `/users/...` can refer to
-// the same inode while `===` reports them as different paths. We canonicalize
-// both sides with `realpath` before comparing, falling back to `path.resolve`
-// only when the file does not yet exist (e.g., a fresh job's stdout_path
-// before the run has started).
+// Defense layers (BOTH must pass — symlink that escapes jobsDir is rejected):
+//   1. Plain string check: `path.dirname(path.resolve(p))` must equal
+//      `path.resolve(jobsDir)`. Defeats `..` traversal at the string level.
+//   2. Realpath check (if the file exists): the realpath of the file's
+//      parent must equal the realpath of jobsDir. Defeats a symlink planted
+//      inside jobsDir that points to a file outside it.
+//
+// The earlier version used `&&` instead of two separate checks; a symlink
+// inside jobsDir would pass the plain check (its dirname IS jobsDir) and we
+// would then trust the realpath without re-validating it against jobsDir,
+// returning a path pointing wherever the symlink targeted.
 export function safeJobLogPath(p, cwd) {
   if (typeof p !== "string" || !p) return null;
   const dirPlain = path.resolve(jobsDir(cwd));
-  let dir = dirPlain;
-  try { dir = fs.realpathSync.native(dirPlain); } catch {}
+  let dirReal = dirPlain;
+  try { dirReal = fs.realpathSync.native(dirPlain); } catch {}
+
   const resolvedPlain = path.resolve(p);
-  // Reject anything that doesn't even resolve into the right basename-parent
-  // before we touch the FS — defends against `../` traversal at the string
-  // level too.
-  if (path.dirname(resolvedPlain) !== dirPlain && path.dirname(resolvedPlain) !== dir) {
-    return null;
-  }
-  let resolved = resolvedPlain;
-  try { resolved = fs.realpathSync.native(resolvedPlain); }
-  catch (e) {
-    // ENOENT is fine — the log file may not exist yet. We already verified
-    // the parent dir match above, so accept the unresolved path. Any other
-    // error (EACCES, EIO) is treated as suspicious and refused.
+  // Layer 1: string-level confinement. Reject `..` traversal before we
+  // touch the FS at all.
+  if (path.dirname(resolvedPlain) !== dirPlain) return null;
+
+  // Layer 2: realpath. If the file exists, its realpath must still live
+  // under the realpath of jobsDir — defeats a symlink planted inside
+  // jobsDir that points outside.
+  let resolvedReal = null;
+  let exists = false;
+  try {
+    resolvedReal = fs.realpathSync.native(resolvedPlain);
+    exists = true;
+  } catch (e) {
+    // ENOENT is OK — the log file may not exist yet (fresh job, before
+    // the run has started). Any other error (EACCES, EIO, ELOOP) is
+    // treated as suspicious and refused.
     if (!e || e.code !== "ENOENT") return null;
   }
-  // After realpath, compare directory components case-sensitively against
-  // the (also realpath'd) jobs dir. On a case-insensitive FS both sides
-  // collapse to the canonical casing, so equality holds.
-  if (path.dirname(resolved) !== dir && path.dirname(resolvedPlain) !== dirPlain) {
-    return null;
-  }
-  return resolved;
+  if (exists && path.dirname(resolvedReal) !== dirReal) return null;
+
+  return exists ? resolvedReal : resolvedPlain;
 }
 
 // Purge non-running jobs older than maxAgeMs (default: all). Returns count.

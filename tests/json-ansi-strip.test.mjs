@@ -64,3 +64,39 @@ test("stop-review-gate-hook.mjs imports sanitizeForTerminal", () => {
   // call becomes a ReferenceError at hook runtime. Lock it down with a test.
   assert.match(src, /import \{[^}]*sanitizeForTerminal[^}]*\} from "\.\/lib\/render\.mjs"/);
 });
+
+test("stop-review-gate-hook.mjs cleans up promptFile if openStdoutTempFile throws (Grok-flagged leak)", () => {
+  // Regression for the resource-leak path Grok flagged on v0.3.0 round 2:
+  // if `openStdoutTempFile()` throws after `writePromptToTempFile()`
+  // succeeds, the prompt file would linger under /tmp forever. The fix
+  // wraps openStdoutTempFile in try/catch and unlinks promptFile on throw.
+  const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
+
+  // Find the CALL site (`= openStdoutTempFile()` inside a destructure),
+  // not the function declaration at the top of the file. The call site
+  // must be inside a try block whose catch unlinks promptFile.
+  const callMatch = src.match(/=\s*openStdoutTempFile\(\)/);
+  assert.ok(callMatch, "stop-gate hook must call openStdoutTempFile() somewhere");
+  const callIdx = callMatch.index;
+  const context = src.slice(Math.max(0, callIdx - 200), callIdx + 400);
+  assert.match(context, /try\s*\{/,
+    "openStdoutTempFile call site must be inside a try block");
+  assert.match(context, /safeUnlink\(promptFile\)/,
+    "the surrounding scope must unlink promptFile when openStdoutTempFile throws");
+});
+
+test("stop-review-gate-hook.mjs uses cleanupResources() in proc.on('error') (Grok-flagged leak)", () => {
+  // The error path used to only unlink promptFile and never close
+  // stdoutFd / unlink stdoutPath — leaking a file descriptor and a temp
+  // file every time `grok` failed to spawn (e.g. ENOENT, EMFILE).
+  const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
+  assert.match(src, /function cleanupResources\(\)/,
+    "cleanupResources helper must exist to centralize fd/file teardown");
+  // Find the proc.on("error", ...) handler block and confirm it calls
+  // cleanupResources before emitting infra failure.
+  const errIdx = src.indexOf("proc.on(\"error\"");
+  assert.ok(errIdx >= 0);
+  const errBlock = src.slice(errIdx, errIdx + 800);
+  assert.match(errBlock, /cleanupResources\(\)/,
+    "the proc.on('error') handler must call cleanupResources()");
+});

@@ -206,7 +206,31 @@ function main() {
   // buffer cap, parseGrokJsonEnvelope returns null, and the gate silently
   // emits "allow" — defeating the gate's purpose for the cases it is
   // supposed to catch.
-  const { fd: stdoutFd, path: stdoutPath } = openStdoutTempFile();
+  //
+  // If allocating the stdout temp file fails (out-of-space, /tmp permission
+  // problem) we must unlink the promptFile we just allocated. Without this
+  // try/catch, a thrown openStdoutTempFile leaks promptFile under /tmp.
+  let stdoutFd, stdoutPath;
+  try {
+    ({ fd: stdoutFd, path: stdoutPath } = openStdoutTempFile());
+  } catch (err) {
+    safeUnlink(promptFile);
+    throw err;
+  }
+
+  // Centralized cleanup. Called from BOTH proc.on("close") and
+  // proc.on("error"); the error path used to skip closing stdoutFd and
+  // unlinking stdoutPath, leaking a file descriptor and a temp file every
+  // time the spawn failed.
+  let cleanedUp = false;
+  function cleanupResources() {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try { fs.closeSync(stdoutFd); } catch {}
+    safeUnlink(promptFile);
+    safeUnlink(stdoutPath);
+  }
+
   let errBuf = "";
   let timedOut = false;
 
@@ -240,14 +264,16 @@ function main() {
 
   proc.on("close", code => {
     clearTimeout(timer);
-    try { fs.closeSync(stdoutFd); } catch {}
-    safeUnlink(promptFile);
 
-    // Read the full captured stdout (bounded) for the envelope parse. The
-    // on-disk file is unlinked at the end so we don't leave per-hook
-    // stdout litter under /tmp.
+    // Read the on-disk stdout BEFORE the centralized cleanup unlinks it.
+    // The order matters: closeSync must come first (so writes are flushed),
+    // then read, then unlink. cleanupResources handles closeSync + unlink
+    // of both promptFile and stdoutPath in one place.
+    try { fs.closeSync(stdoutFd); } catch {}
     const stdoutContent = readBoundedStdout(stdoutPath);
+    safeUnlink(promptFile);
     safeUnlink(stdoutPath);
+    cleanedUp = true;
 
     if (timedOut) {
       emitInfraFailure("review gate timed out");
@@ -286,7 +312,12 @@ function main() {
 
   proc.on("error", err => {
     clearTimeout(timer);
-    safeUnlink(promptFile);
+    // Spawn-error path: stdoutFd may still be open and stdoutPath / promptFile
+    // both exist. The previous version only unlinked promptFile, leaking the
+    // stdout fd + temp file every time the spawn failed (rare but real, e.g.
+    // ENOENT if grok disappears between which() and spawn(), or EMFILE under
+    // fd exhaustion).
+    cleanupResources();
     emitInfraFailure(`review gate error: ${err.message}`);
   });
 }

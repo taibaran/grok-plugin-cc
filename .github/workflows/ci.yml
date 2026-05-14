@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Print Node version
+        run: node --version
+
+      - name: Syntax check all .mjs files
+        run: |
+          set -e
+          for f in plugins/grok/scripts/companion.mjs \
+                   plugins/grok/scripts/session-lifecycle-hook.mjs \
+                   plugins/grok/scripts/stop-review-gate-hook.mjs \
+                   plugins/grok/scripts/lib/*.mjs; do
+            echo "checking $f"
+            node --check "$f"
+          done
+
+      - name: Run unit tests
+        run: npm test
+
+  smoke:
+    name: Smoke test (companion dispatcher)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The companion must run with no Grok CLI installed and still produce a
+      # well-formed `setup --json` report whose `ready` is false. Catches
+      # regressions where the dispatcher crashes instead of reporting a
+      # missing-binary cleanly.
+      - name: Smoke test setup --json without grok installed
+        env:
+          CLAUDE_PLUGIN_DATA: /tmp/grok-plugin-smoke
+        run: |
+          mkdir -p $CLAUDE_PLUGIN_DATA
+          out=$(node plugins/grok/scripts/companion.mjs setup --json) || true
+          echo "$out"
+          echo "$out" | node -e '
+            const text = require("fs").readFileSync(0, "utf8");
+            const parsed = JSON.parse(text);
+            if (parsed.ready !== false) { console.error("Expected ready: false"); process.exit(1); }
+            if (parsed.grok.available !== false) { console.error("Expected grok.available: false"); process.exit(1); }
+            console.log("Smoke setup output parses cleanly and reports unavailable");
+          '

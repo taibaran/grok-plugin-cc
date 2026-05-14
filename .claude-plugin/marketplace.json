@@ -1,0 +1,23 @@
+{
+  "name": "grok-plugin-cc",
+  "owner": {
+    "name": "taibaran"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace publishing the grok-plugin-cc Claude Code plugin.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "grok",
+      "source": "./plugins/grok",
+      "description": "Use xAI's Grok from Claude Code: ask, review, adversarial-review, long-form rescue via subagent. Wraps the local `grok` CLI (xAI Grok Build) with env scrubbing, ANSI sanitization, capability probing, and an optional stop-time review gate.",
+      "version": "0.1.0",
+      "author": { "name": "taibaran" },
+      "category": "ai-assistance",
+      "tags": ["grok", "xai", "code-review", "research", "rescue-agent"],
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/taibaran/grok-plugin-cc"
+    }
+  ]
+}

@@ -31,8 +31,8 @@ Forwarding rules:
 - Default to read-only Grok by NOT adding `--write`.
 - Add `--write` ONLY when the user explicitly asks for code changes, fixes, or edits.
 - Leave `--model` and `--effort` unset by default. Only add them when the user explicitly asks for one.
-- Pass through `--session-id <id>` when the user wants to continue a previous Grok session.
-- Treat `--background`, `--wait`, `--write`, `--read-only`, `--model <value>`, `--effort <value>`, `--session-id <value>`, and `--timeout <value>` as runtime controls and do not include them in the task text passed through.
+- Pass through `--session-id <id>`, `--resume=<id>`, and `--continue` when the user wants to continue a previous Grok session.
+- Treat `--background`, `--wait`, `--write`, `--read-only`, `--model <value>`, `--effort <value>`, `--session-id <value>`, `--resume=<value>`, `--resume`, `--continue`, and `--timeout <value>` as runtime controls and do not include them in the task text passed through.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the companion command exactly as-is.
 - If the Bash call fails because the helper exited non-zero with a recognizable error (auth missing, quota exhausted, model unavailable), surface the helper's stderr verbatim and recommend `/grok:setup`. Do not swallow this case silently.

@@ -14,7 +14,12 @@ the plugin).
 Subcommands match the underlying CLI:
 
 - `/grok:sessions` or `/grok:sessions list` — list recent Grok sessions
-- `/grok:sessions search <query>` — search session contents
+- `/grok:sessions search <query>` — search session contents.
+  If the query starts with `-` or `--` (e.g. searching for previous
+  `--timeout` mentions), use the POSIX `--` terminator to escape it:
+  `/grok:sessions search -- --timeout`. Everything after `--` is
+  treated as a literal search term and forwarded to grok as a
+  positional argv after a re-emitted `--`.
 - `/grok:sessions restore <id>` — restore a prior session for resume
 
 Pair with `--resume <id>` on `/grok:ask`, `/grok:research`, `/grok:rescue`,

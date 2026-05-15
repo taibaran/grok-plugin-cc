@@ -5,6 +5,47 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-05-15
+
+`/goal` round-4 — 3 real findings, the biggest being a **factually
+incorrect resume-guidance message** that v0.9.3 added.
+
+### Bug fixes
+
+- **Grok HIGH — `/grok:rescue --resume=<id>` wasn't actually supported**.
+  v0.9.3's output suggested `(resume: /grok:rescue --resume=<id> or
+  grok -r <id>)` but the `grok-rescue` subagent's prompt only handled
+  `--session-id`. Users following the advice would have their
+  `--resume=<id>` token treated as ordinary task text → continuation
+  intent lost. **Fix**: extended the rescue subagent prompt + the
+  command's argument-hint to preserve `--resume=<id>` and `--continue`
+  as runtime-control flags (same shape as `--session-id`). Now the
+  advertised path actually works.
+
+- **Codex P2 #1 + Codex P2 #2 — integration tests had wrong assertions**.
+  `/grok:setup --json` correctly exits 1 when not-ready (CI signal +
+  actionable JSON), but the test asserted `r.status === 0`.
+  `/grok:inspect` can emit its clear error on stderr, but the test
+  only inspected stdout. Both fixed:
+    - setup: `status === 0 || status === 1` accepted; JSON shape still
+      enforced (`nextSteps` must be present when `!ready`).
+    - inspect: failure is "no output on stdout AND no output on stderr",
+      not just stdout.
+
+- **Grok MED — `/grok:sessions search` POSIX `--` undocumented**.
+  v0.9.2 removed the `allowFlagLikePositionals` heuristic, making
+  `/grok:sessions search --my-pattern` exit 2. The change was correct
+  (consistent with the rest of the wrapper surface) but `sessions.md`
+  didn't tell users the new requirement. Documented: searches with
+  `-`-prefixed tokens need `/grok:sessions search -- --my-pattern`.
+
+### Tests
+
+- 324 passing + 5 integration (skipped by default), same as v0.9.3.
+  Round-4 fixes are docs + agent prompt + test assertion updates;
+  no behavior change in the production paths beyond `/grok:rescue`
+  gaining real `--resume`/`--continue` support.
+
 ## [0.9.3] - 2026-05-15
 
 `/goal` round-3 came back **APPROVE_WITH_NITS from 3/3 reviewers** —

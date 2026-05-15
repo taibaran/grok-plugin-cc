@@ -68,7 +68,14 @@ test("integration: /grok:setup --json reports either 'ready' or actionable nextS
     encoding: "utf8",
     timeout: 60_000
   });
-  assert.equal(r.status, 0, `setup --json exited ${r.status}: ${r.stderr}`);
+  // v0.9.4 (Codex P2 #1 round-4): cmdSetup intentionally exits 1 when
+  // not ready (a CI-meaningful signal that something needs attention)
+  // while still emitting actionable JSON. The test must accept BOTH
+  // status === 0 (fully ready) AND status === 1 (not-ready-but-actionable).
+  // It only fails if the JSON is malformed or missing nextSteps in the
+  // not-ready case.
+  assert.ok(r.status === 0 || r.status === 1,
+    `setup --json exited ${r.status} (expected 0 ready or 1 not-ready): ${r.stderr}`);
   let parsed;
   try { parsed = JSON.parse(r.stdout); }
   catch (e) { assert.fail(`setup --json output was not parseable JSON: ${r.stdout.slice(0, 200)}`); }
@@ -88,8 +95,10 @@ test("integration: /grok:inspect surfaces non-empty config", { skip: !ENABLED &&
   });
   // grok inspect can exit non-zero in some configurations (no AGENTS.md,
   // no skills, etc.); we just need either real output OR a clear error.
-  if (r.status !== 0 && !r.stdout) {
-    assert.fail(`/grok:inspect failed with no output: ${r.stderr}`);
+  // v0.9.4 (Codex P2 #2 + Gemini Important round-4): the error message
+  // can come on STDERR too. The previous version only checked stdout.
+  if (r.status !== 0 && !r.stdout && !r.stderr) {
+    assert.fail("/grok:inspect failed with no output to stdout or stderr");
   }
   // If we did get output, it should have at least the standard sections.
   // (Tolerate format changes — only assert that the output isn't empty.)

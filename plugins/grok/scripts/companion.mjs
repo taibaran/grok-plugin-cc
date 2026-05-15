@@ -31,7 +31,7 @@ import {
   parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
-import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal } from "./lib/render.mjs";
+import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal, formatSessionHint } from "./lib/render.mjs";
 
 // Conservative timeouts. Override with `--timeout <duration>`, or pass
 // `--timeout 0` to disable.
@@ -1105,12 +1105,12 @@ async function cmdTask({ flags, positional }) {
   }
 
   process.stdout.write(`\n\n[grok-plugin] Job ${meta.id} ${meta.status} (exit ${result.code}).\n`);
-  // Only surface a Session footer when the user explicitly named a session
-  // via `--session-id`. The implicit `meta.session_id` from a parsed JSON
-  // envelope is unreliable for `task`: this subcommand uses plain output
-  // for streaming UX, so parseGrokJson returns "unknown" and never records
-  // a sessionId. Showing a half-truth footer ("Session: <id>") that the
-  // user can't actually `grok -r <id>` is worse than no footer at all.
+  // v0.9.7 (Grok LOW #2 round-7): the old v0.9.5 comment described a
+  // limitation that no longer applies (formatSessionHint now surfaces
+  // ALL requested_* entry points, plus getSessionProvenance gates
+  // the legacy session_id branch behind meta.kind !== "task" so plain-
+  // output model hallucinations don't bleed through).
+  //
   // v0.9.6 (3/3 round-6 + round-5 follow-up): formatSessionHint
   // consolidates the priority chain so cmdTask footer, cmdResult, and
   // renderJobDetails all render the same hint shape from the same
@@ -1854,43 +1854,11 @@ function spawnReviewer(spec, common) {
 // strings short-circuit to false. ANCHORED ^ regex prevents matching
 // the phrase mid-prose in a real review.
 export const MAX_PEER_EARLY_EXIT_BYTES = 400;
-// ---------- v0.9.6 session-hint helper ----------
-//
-// Single source of truth for the resume/continue hint rendered by:
-//   - cmdTask's in-flight footer (post-run "Session: X (resume: ...)" line)
-//   - cmdResult (replaying a finished job's details)
-//   - renderJobDetails (lib/render.mjs, used by /grok:status)
-//
-// Before v0.9.6 all three rendered different things and only cmdTask
-// surfaced the new requested_resume / requested_continue provenance.
-// The two render paths missed the resume hint entirely for rescue
-// jobs (which use plain output → meta.session_id is unpopulated).
-//
-// Priority order:
-//   explicit --session-id      (create-or-resume named session)
-//   --resume=<id>              (resume by id)
-//   --resume (bool true)       (resume most-recent)
-//   --continue                 (continue most-recent)
-//   meta.session_id            (legacy: parsed JSON envelope, rare)
-export function formatSessionHint(meta) {
-  if (!meta) return null;
-  if (meta.requested_session_id) {
-    return `Session: ${meta.requested_session_id}  (resume: /grok:rescue --session-id=${meta.requested_session_id}  or  grok -s ${meta.requested_session_id})`;
-  }
-  if (typeof meta.requested_resume === "string") {
-    return `Resumed Grok session: ${meta.requested_resume}  (continue: /grok:rescue --resume=${meta.requested_resume}  or  grok -r ${meta.requested_resume})`;
-  }
-  if (meta.requested_resume === true) {
-    return `Resumed most-recent Grok session  (continue: /grok:rescue --resume  or  grok -r)`;
-  }
-  if (meta.requested_continue) {
-    return `Continued most-recent Grok session (--continue)  (next: /grok:rescue --continue  or  grok -c)`;
-  }
-  if (meta.session_id) {
-    return `Session: ${meta.session_id}  (resume: /grok:rescue --session-id=${meta.session_id}  or  grok -s ${meta.session_id})`;
-  }
-  return null;
-}
+// v0.9.7: formatSessionHint moved to lib/render.mjs (the shared
+// rendering helper module). companion.mjs imports it; render.mjs uses
+// it via formatSessionLabel. Single source of truth across all three
+// surfaces. Closes the duplicate-decision-tree gap 3/3 reviewers
+// flagged in round-7.
 
 export function isPeerEmptyDiffMessage(out) {
   const trimmed = (out || "").trim();

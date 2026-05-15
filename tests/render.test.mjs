@@ -73,10 +73,15 @@ test("renderJobTable produces a Markdown table for one or more jobs", () => {
   assert.match(out, /running/);
 });
 
-test("renderJobDetails includes the session id when present", () => {
+test("renderJobDetails includes the session id when present (review jobs)", () => {
+  // v0.9.7 (Codex P2 round-7): the legacy session_id branch is now
+  // gated on `meta.kind !== "task"` because task jobs use plain output
+  // and the parsed session_id could be a model hallucination. Switch
+  // this test to a review-class job where session_id from the parsed
+  // JSON envelope is authoritative.
   const out = renderJobDetails({
     id: "x-abc-1234",
-    kind: "task",
+    kind: "review",
     status: "completed",
     pid: 12345,
     started_at: "2026-05-14T22:50:00.000Z",

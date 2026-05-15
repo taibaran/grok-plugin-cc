@@ -1,5 +1,80 @@
 // Output rendering helpers for status and result.
 
+// ============================================================================
+// v0.9.7 (3/3 round-7 + Grok MED #1): single source of truth for session
+// provenance + hint rendering. Lives in render.mjs (the rendering helpers
+// module) so cmdTask footer, cmdResult, AND renderJobDetails ALL call from
+// the same place. v0.9.6 had this only in companion.mjs and render.mjs
+// duplicated the priority chain — every reviewer flagged it.
+// ============================================================================
+
+// Returns a tagged-union describing where session provenance came from,
+// or null if the job has none. Priority (highest first):
+//   --session-id flag (sticky id, create-or-resume)
+//   --resume=<id>     (resume named session)
+//   --resume          (bare; resume most-recent)
+//   --continue        (continue most-recent for cwd)
+//   meta.session_id   (legacy: parsed JSON envelope; only trusted for
+//                      jobs that ran with json output — see kind gate)
+//
+// v0.9.7 (Codex P2 round-7): the legacy `session_id` branch is gated on
+// `meta.kind !== "task"`. Task jobs use plain output, so meta.session_id
+// can be populated from a coincidental JSON-shaped model response (a
+// hallucinated sessionId field). Suppress for task. Review/adversarial-
+// review jobs use jsonOutput: true and the parsed sessionId is authoritative.
+export function getSessionProvenance(meta) {
+  if (!meta) return null;
+  if (meta.requested_session_id) return { kind: "session-id", id: meta.requested_session_id };
+  if (typeof meta.requested_resume === "string") return { kind: "resume-id", id: meta.requested_resume };
+  if (meta.requested_resume === true) return { kind: "resume-recent" };
+  if (meta.requested_continue) return { kind: "continue-recent" };
+  if (meta.session_id && meta.kind !== "task") return { kind: "legacy-session-id", id: meta.session_id };
+  return null;
+}
+
+// Full hint with label + continuation command suggestion. Used by
+// cmdTask footer and cmdResult.
+export function formatSessionHint(meta) {
+  const p = getSessionProvenance(meta);
+  if (!p) return null;
+  switch (p.kind) {
+    case "session-id":
+    case "legacy-session-id":
+      // v0.9.7 (Codex P2 #1 round-7): use `grok -r` for the raw-CLI half
+      // of the hint (resume the existing session). `grok -s` is the
+      // create-or-resume short form; both work, but `-r` is the
+      // documented standalone continuation command. Slash-command half
+      // stays `--session-id=` for create-or-resume semantics.
+      return `Session: ${p.id}  (resume: /grok:rescue --session-id=${p.id}  or  grok -r ${p.id})`;
+    case "resume-id":
+      return `Resumed session: ${p.id}  (continue: /grok:rescue --resume=${p.id}  or  grok -r ${p.id})`;
+    case "resume-recent":
+      return `Resumed most-recent Grok session  (continue: /grok:rescue --resume  or  grok -r)`;
+    case "continue-recent":
+      return `Continued most-recent Grok session (--continue)  (next: /grok:rescue --continue  or  grok -c)`;
+  }
+  return null;
+}
+
+// Short label (no command suggestion). Used by renderJobDetails which
+// already prints a Follow-up: section with the relevant slash commands.
+export function formatSessionLabel(meta) {
+  const p = getSessionProvenance(meta);
+  if (!p) return null;
+  switch (p.kind) {
+    case "session-id":
+    case "legacy-session-id":
+      return `Session: ${p.id}`;
+    case "resume-id":
+      return `Resumed session: ${p.id}`;
+    case "resume-recent":
+      return `Resumed most-recent Grok session`;
+    case "continue-recent":
+      return `Continued most-recent Grok session (--continue)`;
+  }
+  return null;
+}
+
 export function fmtTime(s) {
   return s ? s.replace("T", " ").replace(/\..*/, "") : "-";
 }
@@ -110,22 +185,11 @@ export function renderJobDetails(meta) {
   lines.push(`Started: ${fmtTime(meta.started_at)}`);
   if (meta.ended_at) lines.push(`Ended: ${fmtTime(meta.ended_at)}`);
   if (meta.exit_code !== undefined) lines.push(`Exit: ${meta.exit_code}`);
-  // v0.9.6 (3/3 round-6): consult ALL session provenance fields, not
-  // just session_id. Rescue jobs use plain output → parseGrokJson
-  // returns "unknown" → meta.session_id is never set, even when the
-  // user started the job via --session-id / --resume / --continue.
-  // The priority chain matches formatSessionHint in companion.mjs.
-  if (meta.requested_session_id) {
-    lines.push(`Session: ${meta.requested_session_id}`);
-  } else if (typeof meta.requested_resume === "string") {
-    lines.push(`Resumed session: ${meta.requested_resume}`);
-  } else if (meta.requested_resume === true) {
-    lines.push(`Resumed most-recent Grok session`);
-  } else if (meta.requested_continue) {
-    lines.push(`Continued most-recent Grok session (--continue)`);
-  } else if (meta.session_id) {
-    lines.push(`Session: ${meta.session_id}`);
-  }
+  // v0.9.7 (3/3 round-7): use formatSessionLabel — same single source of
+  // truth as cmdTask footer and cmdResult. Removed the duplicated
+  // priority-chain ladder that round-7 reviewers all flagged.
+  const sessionLine = formatSessionLabel(meta);
+  if (sessionLine) lines.push(sessionLine);
   lines.push(`Task: ${meta.task_text || "-"}`);
   lines.push("");
   lines.push("Follow-up:");

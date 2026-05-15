@@ -162,18 +162,21 @@ test("v0.9.1: --worktree=false treats as bool false", () => {
   assert.equal(r.flags.worktree, false);
 });
 
-test("v0.9.6 (3/3 round-6): formatSessionHint renders all 5 priority cases", async () => {
-  const { formatSessionHint } = await import("../plugins/grok/scripts/companion.mjs");
-  // Priority 1: explicit --session-id
+test("v0.9.7 (3/3 round-7): formatSessionHint renders all 5 priority cases (from render.mjs)", async () => {
+  // v0.9.7: moved from companion.mjs to lib/render.mjs (single source
+  // of truth shared with renderJobDetails). Import path updated.
+  const { formatSessionHint } = await import("../plugins/grok/scripts/lib/render.mjs");
+  // Priority 1: explicit --session-id (use --session-id= for create-or-resume + grok -r for raw)
   const hint1 = formatSessionHint({ requested_session_id: "myname" });
   assert.match(hint1, /Session: myname/);
   assert.match(hint1, /--session-id=myname/);
-  assert.match(hint1, /grok -s myname/);
+  assert.match(hint1, /grok -r myname/, "Codex P2 round-7: use grok -r for raw-CLI half");
 
   // Priority 2: --resume=<id> (string)
   const hint2 = formatSessionHint({ requested_resume: "abc-123" });
-  assert.match(hint2, /Resumed Grok session: abc-123/);
+  assert.match(hint2, /Resumed session: abc-123/, "Gemini Nit round-7: consistent 'Resumed session' label");
   assert.match(hint2, /--resume=abc-123/);
+  assert.match(hint2, /grok -r abc-123/);
 
   // Priority 3: bare --resume (true)
   const hint3 = formatSessionHint({ requested_resume: true });
@@ -183,17 +186,35 @@ test("v0.9.6 (3/3 round-6): formatSessionHint renders all 5 priority cases", asy
   // Priority 4: --continue
   const hint4 = formatSessionHint({ requested_continue: true });
   assert.match(hint4, /Continued most-recent/);
-  // Gemini Nit #2 round-6: --continue branch must mention `grok -c` too.
   assert.match(hint4, /grok -c/);
 
-  // Priority 5: legacy meta.session_id
-  const hint5 = formatSessionHint({ session_id: "legacy-x" });
+  // Priority 5: legacy meta.session_id — only when kind != "task"
+  const hint5 = formatSessionHint({ session_id: "legacy-x", kind: "review" });
   assert.match(hint5, /Session: legacy-x/);
   assert.match(hint5, /--session-id=legacy-x/);
+
+  // Codex P2 round-7: task with session_id suppresses (plain output unreliable).
+  assert.equal(formatSessionHint({ session_id: "from-model", kind: "task" }), null,
+    "task-kind session_id must be suppressed (plain output could have model-hallucinated JSON)");
 
   // No provenance → null
   assert.equal(formatSessionHint({}), null);
   assert.equal(formatSessionHint(null), null);
+});
+
+test("v0.9.7 (3/3 round-7): renderJobDetails uses formatSessionLabel from the shared helper", () => {
+  const src = fs.readFileSync(
+    new URL("../plugins/grok/scripts/lib/render.mjs", import.meta.url),
+    "utf8"
+  );
+  const block = src.slice(src.indexOf("export function renderJobDetails"), src.indexOf("return lines.join", src.indexOf("export function renderJobDetails")));
+  // The duplicated priority chain (the v0.9.6 leftover) must be gone.
+  // renderJobDetails should call formatSessionLabel, not inline the chain.
+  assert.match(block, /formatSessionLabel\(meta\)/,
+    "renderJobDetails must call the shared formatSessionLabel — no more duplicate ladder");
+  // And the old duplicated chain must NOT appear in the block.
+  assert.equal(block.includes("meta.requested_session_id"), false,
+    "the duplicated requested_* checks must be removed from renderJobDetails");
 });
 
 test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta", () => {
@@ -204,16 +225,16 @@ test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta
   assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
 });
 
-test("v0.9.6 (3/3 round-6): renderJobDetails consults all session provenance fields", () => {
-  const src = fs.readFileSync(
-    new URL("../plugins/grok/scripts/lib/render.mjs", import.meta.url),
-    "utf8"
-  );
-  const block = src.slice(src.indexOf("export function renderJobDetails"), src.indexOf("return lines.join", src.indexOf("export function renderJobDetails")));
-  assert.match(block, /meta\.requested_session_id/);
-  assert.match(block, /meta\.requested_resume/);
-  assert.match(block, /meta\.requested_continue/);
-  assert.match(block, /meta\.session_id/);
+test("v0.9.7 (3/3 round-7): formatSessionLabel renders all 5 cases (short form)", async () => {
+  const { formatSessionLabel } = await import("../plugins/grok/scripts/lib/render.mjs");
+  assert.equal(formatSessionLabel({ requested_session_id: "x" }), "Session: x");
+  assert.equal(formatSessionLabel({ requested_resume: "abc" }), "Resumed session: abc");
+  assert.equal(formatSessionLabel({ requested_resume: true }), "Resumed most-recent Grok session");
+  assert.equal(formatSessionLabel({ requested_continue: true }), "Continued most-recent Grok session (--continue)");
+  assert.equal(formatSessionLabel({ session_id: "leg", kind: "review" }), "Session: leg");
+  // Task-kind session_id suppressed
+  assert.equal(formatSessionLabel({ session_id: "leg", kind: "task" }), null);
+  assert.equal(formatSessionLabel({}), null);
 });
 
 test("v0.9.6 (3/3 round-6): cmdResult uses formatSessionHint (not inline hint)", () => {

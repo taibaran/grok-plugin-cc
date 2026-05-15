@@ -5,6 +5,62 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-05-15
+
+`/goal` round-7 — 3/3 reviewer convergence (every round, every round) on
+"the consolidation isn't actually consolidated". This release **finally**
+makes good on the architectural claim.
+
+### Bug fixes
+
+- **3/3 Important — `renderJobDetails` still duplicated the priority chain**.
+  v0.9.6 added `formatSessionHint` in `companion.mjs` and *claimed* all
+  three render paths used it. They didn't: `renderJobDetails` (in
+  `lib/render.mjs`) kept its own copy of the ladder. **Fix**: moved
+  `formatSessionHint` + new helpers `getSessionProvenance` (returns a
+  discriminated tagged union — Grok's structural suggestion) and
+  `formatSessionLabel` (short form for `renderJobDetails`) into
+  `lib/render.mjs`. companion.mjs imports the hint helper.
+  renderJobDetails now calls `formatSessionLabel` directly. **One source
+  of truth, three callers.** Future priority changes require editing
+  one file.
+
+- **Codex P2 #2 — Plain-task `meta.session_id` could be model hallucination**.
+  Task jobs run with plain output. If the model's response happens to
+  contain a JSON-shaped envelope with a `sessionId` field, `runJob`'s
+  close handler stored it in `meta.session_id`, and v0.9.6's footer
+  trusted it. **Fix**: `getSessionProvenance` gates the legacy
+  `session_id` branch on `meta.kind !== "task"`. Review/adversarial-review
+  jobs (which use json output) still trust their parsed sessionId.
+
+- **Codex P2 #1 + Gemini Important #1 — Wrong raw-CLI short flag**.
+  v0.9.6 used `grok -s <id>` as the raw-CLI half of the session-id
+  hint. `-s` is the create-or-resume short form; the documented
+  standalone continuation command is `grok -r <id>` (resume only).
+  Users copying the suggestion when the session already existed got
+  the right behavior; users copying it BEFORE the session existed got
+  surprises. **Fix**: use `grok -r <id>` consistently. The slash-command
+  half stays `--session-id=` (create-or-resume) because the plugin's
+  flag is structured differently.
+
+- **Gemini Nit + Grok LOW — Inconsistent labels**.
+  `formatSessionHint` said "Resumed Grok session: X" while
+  `renderJobDetails` said "Resumed session: X". Aligned both on
+  "Resumed session: X".
+
+- **Grok LOW #2 — Stale comment in cmdTask**. The "Only surface a
+  Session footer when the user explicitly named a session…" comment
+  predated v0.9.6 and was factually wrong. Updated to describe what
+  the code actually does.
+
+### Tests
+
+- 3 new behavioral tests on the new helpers (priority order, task-kind
+  suppression, short vs full label, all-5-cases for both hint and
+  label variants). 1 old test updated to use `kind: "review"` since
+  legacy `session_id` is now task-suppressed.
+- Total: 330 passing + 5 integration (skipped).
+
 ## [0.9.6] - 2026-05-15
 
 `/goal` round-6 — 3/3 reviewer convergence (yet again) on the same

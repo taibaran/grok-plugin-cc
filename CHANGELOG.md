@@ -5,6 +5,62 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-05-15
+
+`/goal` round-2 on v0.9.1 surfaced more 3/3-convergent bugs in the new
+parser surface plus a critical regression: the `--` terminator was
+consumed by parseArgs but never re-emitted when forwarding to grok.
+
+### Bug fixes
+
+- **3/3 CRITICAL — `--` terminator silently regressed v0.9.1's fix**.
+  v0.9.1 added POSIX `--` so users could search for literal flag-like
+  strings (`/grok:sessions search -- --timeout`). But
+  `cmdGrokSubcommandPassthrough` then forwarded `["sessions", "search",
+  "--timeout"]` to grok with no protective terminator → grok saw
+  `--timeout` as its OWN flag → workaround broken.
+  **Fix**: parseArgs now returns `literalStartIndex` (the position
+  where `--`-escaped tokens begin). The wrapper splits regular vs
+  literal positionals and re-emits `--` immediately before literals
+  in the forwarded argv.
+
+- **3/3 CRITICAL — Short-alias rewrite over-triggered on prompt text**.
+  v0.9.1 enabled `shortAliases = {w,r,c,m}` globally; a prompt like
+  `/grok:ask explain grep -r foo` set resume=true and consumed `foo`.
+  **Fix**: shortAliases REMOVED from the top-level parseArgs call.
+  The parser feature is still available for explicit opt-in (some
+  future per-subcommand config), but prompt-accepting commands are
+  immune by default. Users must use the long form
+  (`--resume=ID`, `--worktree=name`, `--continue`).
+
+- **Codex P3 + Grok MED — `EMPTY_VALUE` not handled in main() catch**.
+  v0.9.1's parser threw `EMPTY_VALUE` for `--worktree=` but `main()`
+  only converted `MISSING_VALUE` to a usage error (exit 2). Empty
+  inline values fell to the outer fatal handler (exit 1) with the
+  wrong message. **Fix**: catch both codes the same way.
+
+- **Gemini Nit #4 — Control-byte denylist blocked legitimate whitespace**.
+  v0.9.1's `[\x00-\x1f\x7f]` rejected TAB / LF / CR. Real use cases
+  (multi-line memory entries, pasted multi-line search queries) were
+  blocked. **Fix**: `CONTROL_BYTE_FREETEXT_DENYLIST = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/`
+  — TAB/LF/CR allowed, every other C0 + DEL still blocked.
+
+- **Gemini Important #2 — Wrapper couldn't distinguish escaped from typo'd flags**.
+  Same fix as the first bullet: `literalStartIndex` tracks which
+  positionals were explicitly escaped via `--`. The wrapper now
+  bypasses the flag-like-positional check for literals (the user
+  explicitly told us they want it literal even if it looks like a flag).
+  The previous per-subcommand `allowFlagLikePositionals: positional[0]
+  === "search"` heuristic is no longer needed.
+
+### Tests
+
+- 7 new behavior tests covering: `--` terminator re-emission, top-level
+  immunity to short aliases (verified with explicit opt-in still works),
+  multi-line free-text positionals (TAB/LF/CR), BEL/ESC still blocked,
+  EMPTY_VALUE exit code = 2 not 1, literalStartIndex tracking.
+- Total suite: 320 passing.
+
 ## [0.9.1] - 2026-05-15
 
 `/goal` round-1 on v0.9.0 surfaced **2 CRITICAL 3/3-convergent bugs**

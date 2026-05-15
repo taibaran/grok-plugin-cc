@@ -64,21 +64,32 @@ export function parseArgs(argv, {
   const flags = {};
   const positional = [];
   let afterTerminator = false;
+  // v0.9.2 (3/3 round-2 critical + Gemini Important): track WHERE the
+  // `--` terminator was seen. Wrappers need to know which positionals
+  // were "literal-escaped" so they can re-emit the `--` before
+  // forwarding to grok (otherwise grok itself sees `--timeout` as a
+  // flag and the workaround silently regresses).
+  let literalStartIndex = -1;
   for (let i = 0; i < tokens.length; i++) {
     let t = tokens[i];
-    // v0.9.1: POSIX `--` terminator. Once seen, every subsequent token
-    // is a literal positional regardless of its leading dashes. Lets
-    // users search for `--timeout` literally via
-    // `/grok:sessions search -- --timeout` without the parser
-    // intercepting the `--timeout` as a flag.
+    // POSIX `--` terminator. Once seen, every subsequent token is a
+    // literal positional regardless of its leading dashes.
     if (afterTerminator) { positional.push(t); continue; }
-    if (t === "--") { afterTerminator = true; continue; }
+    if (t === "--") {
+      afterTerminator = true;
+      literalStartIndex = positional.length;
+      continue;
+    }
     if (!t.startsWith("-")) { positional.push(t); continue; }
-    // v0.9.1 (Codex P2 round-1): short-alias resolution. `-X` where X
-    // is in shortAliases gets rewritten to `--<long>`. `-XY` where X
-    // is in the map: treat as `--<long>=Y` (single-char + value, e.g.
-    // `-rabc-123` → `--resume=abc-123`). `--` and longer `--*` skip
-    // this branch.
+    // v0.9.1 → v0.9.2: short-alias resolution. v0.9.2 (3/3 round-2:
+    // Codex P2 + Gemini Important + Grok MED) — short aliases are
+    // OFF BY DEFAULT now. v0.9.1 enabled them for every command,
+    // which over-rewrote `-r foo` in free-form prompts (e.g.,
+    // `/grok:ask explain grep -r foo` set resume=true and dropped
+    // `foo`). Callers who genuinely need short flags must opt in via
+    // the `shortAliases` parser option AND configure them per
+    // subcommand. The default top-level dispatch passes an empty
+    // map, so prompt-accepting commands are immune.
     if (t.length >= 2 && t[0] === "-" && t[1] !== "-") {
       const ch = t[1];
       if (shortAliases[ch]) {
@@ -89,6 +100,10 @@ export function parseArgs(argv, {
           t = `--${longName}${t.slice(2)}`;  // include the =value
         } else {
           // Bundle form: `-rabc` → `--resume=abc`
+          // Grok MED round-2 noted that for BOOL aliases this swallows
+          // attached text. We document the contract: short-alias map
+          // is only meant for value-taking flags. Bool clusters like
+          // `-cv` are explicitly NOT supported.
           t = `--${longName}=${t.slice(2)}`;
         }
       } else {
@@ -155,7 +170,10 @@ export function parseArgs(argv, {
     // Unknown flag — keep as positional for downstream handling.
     positional.push(t);
   }
-  return { flags, positional };
+  // v0.9.2: if no `--` terminator was seen, literalStartIndex stays
+  // at -1 and callers can treat the whole `positional` array as
+  // regular tokens.
+  return { flags, positional, literalStartIndex };
 }
 
 export const COMMON_BOOL_FLAGS = new Set([

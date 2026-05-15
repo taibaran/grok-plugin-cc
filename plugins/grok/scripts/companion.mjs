@@ -15,7 +15,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS, COMMON_SHORT_ALIASES, parseDuration } from "./lib/args.mjs";
+import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS, parseDuration } from "./lib/args.mjs";
 import {
   ensureDir, jobsDir, newJobId,
   writeJobMeta, readJobMeta, listJobs, pruneJobs,
@@ -2090,39 +2090,48 @@ async function cmdAggregateReview({ flags, positional }) {
 //   - --timeout is now in every command's allowFlags (was advertised
 //     in argument-hint but dropped silently).
 const DEFAULT_SUB_TIMEOUT_MS = 30 * 1000;
-const CONTROL_BYTE_DENYLIST = /[\x00-\x1f\x7f]/;
-function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, allowFlags = new Set(), allowFlagLikePositionals = false, defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
+// v0.9.2 (Gemini Nit #4 round-2): allow TAB (0x09), LF (0x0A), CR
+// (0x0D) in subcommand positionals. Real-world inputs (`grok memory
+// add "multi\nline\nfact"`, pasted multi-line search queries) need
+// these. Still reject every other C0 (NUL, BEL, ESC, etc.) and DEL.
+const CONTROL_BYTE_FREETEXT_DENYLIST = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, literalStartIndex = -1, label, allowFlags = new Set(), allowFlagLikePositionals = false, defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
   if (!which("grok")) {
     console.error("Grok CLI not installed. Run `/grok:setup`.");
     process.exit(127);
   }
   // Construct argv. Positionals pass through after a defense-in-depth
   // check: refuse control bytes (no-shell argv still gets these
-  // rendered when grok prints back) and refuse oversize. spawnSync
-  // without `shell: true` already neutralizes shell-meta — no need
-  // to over-reject `?`, `&`, `%`, etc. which appear in real MCP URLs.
-  const safePos = [];
-  for (const p of positional) {
+  // rendered when grok prints back) and refuse oversize.
+  //
+  // v0.9.2 (Gemini Important #2 round-2): track which positionals
+  // were `--`-escaped via the parser's literalStartIndex. Those bypass
+  // the flag-like-positional check (the user explicitly told us they
+  // want a literal token even if it looks like a flag). We also need
+  // to re-emit `--` before them when forwarding to grok so grok
+  // itself doesn't reinterpret them as flags (3/3 round-2 critical).
+  const safeRegular = [];
+  const safeLiteral = [];
+  for (let idx = 0; idx < positional.length; idx++) {
+    const p = positional[idx];
+    const isLiteral = literalStartIndex >= 0 && idx >= literalStartIndex;
     const s = String(p);
     if (s.length > 1024) {
       console.error(`Refusing to forward oversize argument (${s.length} > 1024 chars).`);
       process.exit(2);
     }
-    if (CONTROL_BYTE_DENYLIST.test(s)) {
-      console.error(`Refusing to forward argument with control bytes: ${s.slice(0, 64)}`);
+    if (CONTROL_BYTE_FREETEXT_DENYLIST.test(s)) {
+      console.error(`Refusing to forward argument with disallowed control bytes: ${s.slice(0, 64)}`);
       process.exit(2);
     }
-    // Per-command flag-like-positional gate. Sessions `search` is
-    // explicitly opted in so users can grep for previous "--timeout"
-    // mentions. Everything else still rejects `--*` / `-X` patterns
-    // so unknown flags don't slip through.
-    if (!allowFlagLikePositionals) {
+    if (!isLiteral && !allowFlagLikePositionals) {
       if (s.startsWith("--") || (s.length >= 2 && s[0] === "-" && /^-[A-Za-z]/.test(s))) {
-        console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)}`);
+        console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)} (use \`-- ${s.slice(0, 32)}\` to pass literally)`);
         process.exit(2);
       }
     }
-    safePos.push(s);
+    if (isLiteral) safeLiteral.push(s);
+    else safeRegular.push(s);
   }
   // Selected flags are passed through. Only flags in `allowFlags` are
   // forwarded; unknown flags are dropped (the slash command's arg-hint
@@ -2137,7 +2146,14 @@ function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, al
       safeFlags.push(`--${k}`, sv);
     }
   }
-  const argv = [subcommand, ...safePos, ...safeFlags];
+  // v0.9.2 (3/3 round-2 critical: Gemini Critical #1 + Codex P2 #1):
+  // re-emit `--` before literal positionals so grok itself doesn't
+  // re-interpret them as flags. The previous code consumed `--` in
+  // the parser then forwarded the literal `--timeout` to grok with
+  // no protection → grok parsed it as a flag → the v0.9.1 fix
+  // silently regressed.
+  const argv = [subcommand, ...safeRegular, ...safeFlags];
+  if (safeLiteral.length > 0) argv.push("--", ...safeLiteral);
   const timeoutMs = resolveTimeoutMs(flags.timeout, defaultTimeoutMs);
   const spawnOpts = {
     encoding: "utf8",
@@ -2173,40 +2189,41 @@ function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, al
 // the docs match the impl.
 const SUBCMD_BASE_ALLOW = new Set(["json", "timeout"]);
 
-function cmdWorktree({ flags, positional }) {
+function cmdWorktree(args) {
   return cmdGrokSubcommandPassthrough({
     subcommand: "worktree",
-    flags, positional,
+    flags: args.flags, positional: args.positional,
+    literalStartIndex: args.literalStartIndex,
     label: "worktree",
     allowFlags: SUBCMD_BASE_ALLOW,
     defaultTimeoutMs: 30 * 1000
   });
 }
-function cmdSessions({ flags, positional }) {
+function cmdSessions(args) {
   return cmdGrokSubcommandPassthrough({
     subcommand: "sessions",
-    flags, positional,
+    flags: args.flags, positional: args.positional,
+    literalStartIndex: args.literalStartIndex,
     label: "sessions",
     allowFlags: SUBCMD_BASE_ALLOW,
-    // sessions `search "--timeout"` is a legitimate text search;
-    // don't reject flag-like positionals here.
-    allowFlagLikePositionals: positional[0] === "search",
     defaultTimeoutMs: 30 * 1000
   });
 }
-function cmdMemory({ flags, positional }) {
+function cmdMemory(args) {
   return cmdGrokSubcommandPassthrough({
     subcommand: "memory",
-    flags, positional,
+    flags: args.flags, positional: args.positional,
+    literalStartIndex: args.literalStartIndex,
     label: "memory",
     allowFlags: SUBCMD_BASE_ALLOW,
     defaultTimeoutMs: 30 * 1000
   });
 }
-function cmdMcp({ flags, positional }) {
+function cmdMcp(args) {
   return cmdGrokSubcommandPassthrough({
     subcommand: "mcp",
-    flags, positional,
+    flags: args.flags, positional: args.positional,
+    literalStartIndex: args.literalStartIndex,
     label: "mcp",
     allowFlags: SUBCMD_BASE_ALLOW,
     // mcp doctor probes server health which can be slow; bump to 2 min.
@@ -2272,15 +2289,29 @@ async function main() {
   }
   let args;
   try {
+    // v0.9.2 (3/3 round-2 Codex P2 #2 + Gemini Important #3):
+    // shortAliases removed from the top-level dispatch. v0.9.1
+    // enabled them globally, which mis-rewrote `-r foo` inside
+    // free-form prompts like `/grok:ask explain grep -r foo` — the
+    // parser set resume=true and consumed `foo` as part of the
+    // misinterpreted bundle. Users must now use the long form
+    // (--resume=ID, --worktree=name, --continue). The slash command
+    // .md files document only the long form.
     args = parseArgs(rest, {
       boolFlags: COMMON_BOOL_FLAGS,
       valueFlags: COMMON_VALUE_FLAGS,
       repeatableFlags: COMMON_REPEATABLE_FLAGS,
-      optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS,
-      shortAliases: COMMON_SHORT_ALIASES
+      optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
     });
   } catch (e) {
-    if (e.code === "MISSING_VALUE") { console.error(e.message); process.exit(2); }
+    // v0.9.2 (Codex P3 + Grok MED round-2): EMPTY_VALUE was thrown by
+    // the v0.9.1 optional-value parser but only MISSING_VALUE was
+    // caught here — EMPTY_VALUE fell through to the outer fatal
+    // handler and exited 1 instead of the proper usage-error exit 2.
+    if (e.code === "MISSING_VALUE" || e.code === "EMPTY_VALUE") {
+      console.error(e.message);
+      process.exit(2);
+    }
     throw e;
   }
   switch (sub) {

@@ -162,6 +162,65 @@ test("v0.9.1: --worktree=false treats as bool false", () => {
   assert.equal(r.flags.worktree, false);
 });
 
+test("v0.9.2 (3/3 round-2): top-level dispatch does NOT enable short aliases (prompt safety)", () => {
+  // v0.9.1 enabled short aliases globally → `/grok:ask explain grep
+  // -r foo` set resume=true and dropped foo. v0.9.2 (Codex P2 #2 +
+  // Gemini Important #3) removes them from the top-level parseArgs call.
+  const r = parseArgs(["-r", "foo", "bar"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+    // NO shortAliases passed — same as the top-level main() dispatch.
+  });
+  assert.equal(r.flags.resume, undefined, "without shortAliases, -r must NOT set resume");
+  // `-r` becomes positional, where the wrapper would refuse it as a
+  // flag-like positional unless allowFlagLikePositionals is set.
+  assert.deepEqual(r.positional, ["-r", "foo", "bar"]);
+});
+
+test("v0.9.2: parser still SUPPORTS shortAliases when callers opt in (feature available, off by default)", () => {
+  const r = parseArgs(["-r", "session-1", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS,
+    shortAliases: { r: "resume" }   // explicit opt-in
+  });
+  assert.equal(r.flags.resume, true);
+});
+
+test("v0.9.2 (Gemini Nit #4 round-2): control-byte denylist allows TAB + LF + CR for free-text positionals", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "subcmd-list");
+  // `memory add "multi\nline fact"` is a legitimate use case — the user
+  // is storing a multi-line memory entry. TAB and CR are similarly
+  // legitimate for pasted code or terminal output.
+  const r = runComp(d, ["memory", "add", "fact1\nfact2"]);
+  assert.equal(r.status, 0, `multi-line memory entry must be allowed; got: ${r.stderr}`);
+});
+
+test("v0.9.2: BEL (0x07) and ESC (0x1B) still blocked", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "ok-plain");
+  const r1 = runComp(d, ["worktree", "list\x07bell"]);
+  assert.notEqual(r1.status, 0);
+  assert.match(r1.stderr, /control bytes/i);
+  const r2 = runComp(d, ["worktree", "list\x1b[31m"]);
+  assert.notEqual(r2.status, 0);
+});
+
+test("v0.9.2 (Codex P3 + Grok MED round-2): EMPTY_VALUE returns exit 2 (usage error)", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "ok-json");
+  // `--worktree=` with empty inline triggers EMPTY_VALUE in parseArgs.
+  // v0.9.1's main() catch only handled MISSING_VALUE → exited 1.
+  // v0.9.2 catches both.
+  const r = runComp(d, ["ask", "--worktree=", "what now"]);
+  assert.equal(r.status, 2, "EMPTY_VALUE must exit 2 (usage), not 1 (fatal)");
+  assert.match(r.stderr, /Empty value for --worktree/i);
+});
+
 test("v0.9.1 (Codex round-1): short-flag aliases -w / -r / -c", () => {
   const r1 = parseArgs(["-r", "session-1", "task"], {
     boolFlags: COMMON_BOOL_FLAGS,
@@ -328,17 +387,22 @@ test("v0.9.1: MCP URLs with ? & % # are accepted", t => {
   assert.ok(recorded.includes("https://example.com/api?token=abc&format=json#prod"));
 });
 
-test("v0.9.1: /grok:sessions search with `--` terminator allows flag-like text", t => {
+test("v0.9.2 (3/3 round-2 critical): `--` terminator is re-emitted before literals when forwarding", t => {
+  // v0.9.1 added the POSIX `--` terminator but DID NOT re-emit it when
+  // building the forwarded argv → grok itself saw `sessions search
+  // --timeout` and reinterpreted --timeout as a flag → the workaround
+  // silently regressed. v0.9.2 re-inserts `--` before any literal
+  // positionals so grok also treats them literally.
   const d = makeFakeGrokDir(t);
   setFakeMode(d, "subcmd-list");
-  // POSIX `--` terminator: everything after is literal positional.
-  // Users wanting to search for previous "--timeout" mentions type:
-  //   /grok:sessions search -- --timeout
   const r = runComp(d, ["sessions", "search", "--", "--timeout"]);
   assert.equal(r.status, 0, `sessions search via -- terminator must accept flag-like queries; got: ${r.stderr}`);
   const recorded = readArgs(d);
-  assert.ok(recorded.includes("--timeout"),
-    "the literal `--timeout` must reach grok as a positional argv after `--`");
+  // The forwarded argv must contain `--` immediately before the literals.
+  const dashIdx = recorded.indexOf("--");
+  assert.notEqual(dashIdx, -1, "`--` must be re-emitted in the forwarded argv");
+  assert.equal(recorded[dashIdx + 1], "--timeout",
+    "the literal `--timeout` must come AFTER the `--` so grok treats it as a positional");
 });
 
 test("v0.9.1: POSIX `--` terminator collects everything after as positional", () => {

@@ -5,6 +5,61 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-05-15
+
+`/goal` round-1 on v0.9.0 surfaced **2 CRITICAL 3/3-convergent bugs**
+in the v0.9.0 new surface plus several smaller items.
+
+### Bug fixes
+
+- **3/3 CRITICAL — Optional-value parser ate prompt tokens**.
+  `/grok:ask --worktree how do I fix this?` named the worktree `how`
+  and dropped that word from the prompt — the v0.9.0 peek-ahead
+  semantics consumed any non-`--` token after the flag. **Fix**:
+  removed peek-ahead. Bare `--worktree` is always bool; named form
+  REQUIRES inline `=`: `--worktree=feature-x`. Empty `--worktree=`
+  throws (explicit user intent unclear). `--worktree=false` = bool false.
+
+- **3/3 CRITICAL — Subcommand positional allowlist over-rejected**.
+  `cmdGrokSubcommandPassthrough`'s `[A-Za-z0-9._:@/+=-]+` regex blocked
+  real MCP URLs (`?token=`, `#fragment`) and any free-text session
+  search. **Fix**: replaced strict allowlist with a control-byte
+  denylist (`spawnSync` is shell-less, so shell-meta is already
+  Node-mitigated). Length cap raised to 1024.
+
+- **Codex P2 — Short-flag aliases never reached parser**.
+  Grok CLI documents `-w/-r/-c` shorthand; the parser only saw `--`-prefixed
+  forms, so `/grok:ask -r abc-123 prompt` left `-r` and `abc-123` in
+  positional. **Fix**: new `shortAliases` parser option +
+  `COMMON_SHORT_ALIASES = { w: "worktree", r: "resume", c: "continue",
+  m: "model" }`. Bundle form `-rabc` rewrites to `--resume=abc`.
+
+- **Gemini Important — Flag-like positionals always rejected**.
+  Searching for `--timeout` mentions via `/grok:sessions search "--timeout"`
+  errored "Refusing to forward unknown flag-like argument". **Fix**:
+  POSIX `--` terminator added to parseArgs (everything after is
+  literal positional). Users type `/grok:sessions search -- --timeout`.
+
+- **Grok MED — `--timeout` advertised but dropped**. Every wrapper's
+  `.md` arg-hint listed `[--timeout <duration>]`, but
+  `cmdGrokSubcommandPassthrough`'s `allowFlags: new Set(["json"])`
+  dropped it before forwarding. **Fix**: new `SUBCMD_BASE_ALLOW =
+  new Set(["json", "timeout"])` shared across all 4 wrappers.
+
+- **Gemini Nit — Empty inline value silently dropped**.
+  `--worktree=""` used to just be skipped. **Fix**: parser throws
+  `EMPTY_VALUE` with a clear message ("Use --flag for bool or
+  --flag=<value> for named").
+
+### Tests
+
+- 9 new behavior tests covering the new parser semantics (bool-only
+  bare form, inline `=` named, empty throw, `=false` bool, short
+  aliases incl. bundle form, `--` terminator, MCP URL acceptance,
+  flag-like search with terminator, `--timeout` forwarding).
+- Updated 3 v0.9.0 tests for the new semantics.
+- Total suite: 315 passing.
+
 ## [0.9.0] - 2026-05-15
 
 **"Native Grok Differentiators"** — the second 4-LLM-consensus release.

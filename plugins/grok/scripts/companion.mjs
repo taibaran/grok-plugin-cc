@@ -15,7 +15,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS, parseDuration } from "./lib/args.mjs";
+import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS, COMMON_SHORT_ALIASES, parseDuration } from "./lib/args.mjs";
 import {
   ensureDir, jobsDir, newJobId,
   writeJobMeta, readJobMeta, listJobs, pruneJobs,
@@ -2074,37 +2074,53 @@ async function cmdAggregateReview({ flags, positional }) {
 
 // ---------- v0.9.0: thin subcommand wrappers ----------
 //
-// /grok:worktree, /grok:sessions, /grok:memory, /grok:mcp, /grok:sandbox
-// all share the same shape: wrap a `grok <subcmd> [...]` invocation with
-// the plugin's standard env scrubbing + ANSI sanitization + timeout +
-// auth-hint surface. Centralized here to avoid 5 copies of the same
-// boilerplate.
+// /grok:worktree, /grok:sessions, /grok:memory, /grok:mcp all share the
+// same shape: wrap a `grok <subcmd> [...]` invocation with the plugin's
+// standard env scrubbing + ANSI sanitization + timeout + auth-hint
+// surface. Centralized here to avoid 4 copies of the same boilerplate.
+//
+// v0.9.1 (3/3 reviewer consensus round-1):
+//   - Positional allowlist replaced with control-byte denylist.
+//     spawnSync is invoked without `shell: true` so shell-meta is
+//     pre-mitigated by Node — the strict allowlist was over-rejecting
+//     valid MCP URLs (`?token=`, `#fragment`) and free-text session
+//     search queries.
+//   - allowedPositionalLooksLikeFlag: per-command control. Sessions
+//     `search` legitimately searches for `--`-prefixed strings.
+//   - --timeout is now in every command's allowFlags (was advertised
+//     in argument-hint but dropped silently).
 const DEFAULT_SUB_TIMEOUT_MS = 30 * 1000;
-const ALLOWED_GROK_SUBCOMMAND_ARGS = /^[A-Za-z0-9._:@/+=-]+$/;
-function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, allowFlags = new Set(), defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
+const CONTROL_BYTE_DENYLIST = /[\x00-\x1f\x7f]/;
+function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, allowFlags = new Set(), allowFlagLikePositionals = false, defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
   if (!which("grok")) {
     console.error("Grok CLI not installed. Run `/grok:setup`.");
     process.exit(127);
   }
-  // Construct argv. positional tokens are passed straight through but
-  // each one must match a conservative whitelist (alphanumerics + a
-  // few punctuation chars). Prevents shell-meta or control-byte
-  // injection if a malicious LLM prompt gets pasted in here.
+  // Construct argv. Positionals pass through after a defense-in-depth
+  // check: refuse control bytes (no-shell argv still gets these
+  // rendered when grok prints back) and refuse oversize. spawnSync
+  // without `shell: true` already neutralizes shell-meta — no need
+  // to over-reject `?`, `&`, `%`, etc. which appear in real MCP URLs.
   const safePos = [];
   for (const p of positional) {
     const s = String(p);
-    if (s.length > 256 || !ALLOWED_GROK_SUBCOMMAND_ARGS.test(s)) {
-      console.error(`Refusing to forward argument with special chars: ${s.slice(0, 64)}`);
+    if (s.length > 1024) {
+      console.error(`Refusing to forward oversize argument (${s.length} > 1024 chars).`);
       process.exit(2);
     }
-    // Defense in depth: refuse positionals that look like CLI flags
-    // (start with `--` or `-X` for any single char). Unknown flags
-    // fall into positional via parseArgs; we don't want to silently
-    // forward them to grok. The slash command's arg-hint documents
-    // what's accepted; anything else is rejected here.
-    if (s.startsWith("--") || (s.length >= 2 && s.startsWith("-") && /^-[A-Za-z]/.test(s))) {
-      console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)}`);
+    if (CONTROL_BYTE_DENYLIST.test(s)) {
+      console.error(`Refusing to forward argument with control bytes: ${s.slice(0, 64)}`);
       process.exit(2);
+    }
+    // Per-command flag-like-positional gate. Sessions `search` is
+    // explicitly opted in so users can grep for previous "--timeout"
+    // mentions. Everything else still rejects `--*` / `-X` patterns
+    // so unknown flags don't slip through.
+    if (!allowFlagLikePositionals) {
+      if (s.startsWith("--") || (s.length >= 2 && s[0] === "-" && /^-[A-Za-z]/.test(s))) {
+        console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)}`);
+        process.exit(2);
+      }
     }
     safePos.push(s);
   }
@@ -2152,12 +2168,17 @@ function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, al
   process.exit(r.status ?? 0);
 }
 
+// v0.9.1 (Grok MED round-1): --timeout was advertised in every wrapper's
+// argument-hint but dropped by the allowlist. Add it everywhere so
+// the docs match the impl.
+const SUBCMD_BASE_ALLOW = new Set(["json", "timeout"]);
+
 function cmdWorktree({ flags, positional }) {
   return cmdGrokSubcommandPassthrough({
     subcommand: "worktree",
     flags, positional,
     label: "worktree",
-    allowFlags: new Set(["json"]),
+    allowFlags: SUBCMD_BASE_ALLOW,
     defaultTimeoutMs: 30 * 1000
   });
 }
@@ -2166,7 +2187,10 @@ function cmdSessions({ flags, positional }) {
     subcommand: "sessions",
     flags, positional,
     label: "sessions",
-    allowFlags: new Set(["json"]),
+    allowFlags: SUBCMD_BASE_ALLOW,
+    // sessions `search "--timeout"` is a legitimate text search;
+    // don't reject flag-like positionals here.
+    allowFlagLikePositionals: positional[0] === "search",
     defaultTimeoutMs: 30 * 1000
   });
 }
@@ -2175,7 +2199,7 @@ function cmdMemory({ flags, positional }) {
     subcommand: "memory",
     flags, positional,
     label: "memory",
-    allowFlags: new Set(["json"]),
+    allowFlags: SUBCMD_BASE_ALLOW,
     defaultTimeoutMs: 30 * 1000
   });
 }
@@ -2184,7 +2208,7 @@ function cmdMcp({ flags, positional }) {
     subcommand: "mcp",
     flags, positional,
     label: "mcp",
-    allowFlags: new Set(["json"]),
+    allowFlags: SUBCMD_BASE_ALLOW,
     // mcp doctor probes server health which can be slow; bump to 2 min.
     defaultTimeoutMs: 2 * 60 * 1000
   });
@@ -2252,7 +2276,8 @@ async function main() {
       boolFlags: COMMON_BOOL_FLAGS,
       valueFlags: COMMON_VALUE_FLAGS,
       repeatableFlags: COMMON_REPEATABLE_FLAGS,
-      optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+      optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS,
+      shortAliases: COMMON_SHORT_ALIASES
     });
   } catch (e) {
     if (e.code === "MISSING_VALUE") { console.error(e.message); process.exit(2); }

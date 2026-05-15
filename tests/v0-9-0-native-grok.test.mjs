@@ -85,15 +85,18 @@ test("v0.9.0: --worktree before a `--`-prefixed flag stays bool", () => {
   assert.deepEqual(r.positional, ["task"]);
 });
 
-test("v0.9.0: --worktree <name> parses as named (value form)", () => {
+test("v0.9.1: --worktree my-feature (space form) treats my-feature as positional, NOT the worktree name", () => {
+  // v0.9.1 removed the peek-ahead semantics that ate prompt tokens.
+  // To set a named worktree, users must use --worktree=name (inline `=`).
+  // Space form: --worktree is bool, next token is part of the prompt.
   const r = parseArgs(["--worktree", "my-feature", "fix bug"], {
     boolFlags: COMMON_BOOL_FLAGS,
     valueFlags: COMMON_VALUE_FLAGS,
     repeatableFlags: COMMON_REPEATABLE_FLAGS,
     optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
   });
-  assert.equal(r.flags.worktree, "my-feature");
-  assert.deepEqual(r.positional, ["fix bug"]);
+  assert.equal(r.flags.worktree, true);
+  assert.deepEqual(r.positional, ["my-feature", "fix bug"]);
 });
 
 test("v0.9.0: --worktree=name inline form", () => {
@@ -117,15 +120,76 @@ test("v0.9.0: --worktree followed by --other flag treats --worktree as bool", ()
   assert.equal(r.flags.continue, true);
 });
 
-test("v0.9.0: --resume <id> parses the id as the value", () => {
+test("v0.9.1: --resume abc-123 space form treats id as positional (use --resume=abc-123 for named)", () => {
   const a = parseArgs(["--resume", "abc-123", "--continue"], {
     boolFlags: COMMON_BOOL_FLAGS,
     valueFlags: COMMON_VALUE_FLAGS,
     repeatableFlags: COMMON_REPEATABLE_FLAGS,
     optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
   });
-  assert.equal(a.flags.resume, "abc-123");
+  assert.equal(a.flags.resume, true);
   assert.equal(a.flags.continue, true);
+  assert.deepEqual(a.positional, ["abc-123"]);
+});
+
+test("v0.9.1: --resume=abc-123 inline form parses the id as the value", () => {
+  const r = parseArgs(["--resume=abc-123", "what next"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+  });
+  assert.equal(r.flags.resume, "abc-123");
+  assert.deepEqual(r.positional, ["what next"]);
+});
+
+test("v0.9.1: --worktree= (empty inline) throws — user must pick true or a value", () => {
+  assert.throws(() => parseArgs(["--worktree=", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+  }), /Empty value for --worktree/i);
+});
+
+test("v0.9.1: --worktree=false treats as bool false", () => {
+  const r = parseArgs(["--worktree=false", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+  });
+  assert.equal(r.flags.worktree, false);
+});
+
+test("v0.9.1 (Codex round-1): short-flag aliases -w / -r / -c", () => {
+  const r1 = parseArgs(["-r", "session-1", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS,
+    shortAliases: { r: "resume" }
+  });
+  // -r without `=` is bool form (same semantics as --resume)
+  assert.equal(r1.flags.resume, true);
+  assert.deepEqual(r1.positional, ["session-1", "task"]);
+
+  // -rsession-id bundled form rewrites to --resume=session-id
+  const r2 = parseArgs(["-rabc-xyz", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS,
+    shortAliases: { r: "resume" }
+  });
+  assert.equal(r2.flags.resume, "abc-xyz");
+
+  // -c (continue) — bool flag
+  const r3 = parseArgs(["-c", "task"], {
+    boolFlags: new Set(["continue"]),
+    shortAliases: { c: "continue" }
+  });
+  assert.equal(r3.flags.continue, true);
 });
 
 test("v0.9.0: bare --resume (no following token) is bool form", () => {
@@ -238,13 +302,76 @@ test("v0.9.0 E2E: /grok:memory + /grok:mcp dispatch correctly", t => {
   assert.equal(readArgs(d)[0], "mcp");
 });
 
-test("v0.9.0 SECURITY: subcommand passthrough refuses shell-meta in positional args", t => {
+test("v0.9.1 SECURITY: subcommand passthrough refuses CONTROL BYTES in positional args", t => {
+  // v0.9.1 widened the allowlist (was over-rejecting valid MCP URLs).
+  // spawnSync is no-shell so shell-meta like `; rm -rf /` is safe — it
+  // becomes a literal argv string passed to grok, which would reject it
+  // as an unknown subcommand. The real defense is against control bytes
+  // (which get rendered when grok echoes the bad arg back).
   const d = makeFakeGrokDir(t);
   setFakeMode(d, "ok-plain");
-  const r = runComp(d, ["worktree", "list; rm -rf /"]);
+  // Control byte (0x07 BEL) must still be refused.
+  const r = runComp(d, ["worktree", "list\x07bell"]);
   assert.notEqual(r.status, 0,
-    "shell metacharacters in positional must be refused (not forwarded to grok)");
-  assert.match(r.stderr, /Refusing to forward/i);
+    "control bytes in positional must be refused");
+  assert.match(r.stderr, /control bytes/i);
+});
+
+test("v0.9.1: MCP URLs with ? & % # are accepted", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "subcmd-list");
+  // Real-world MCP URL with query params + fragment.
+  const r = runComp(d, ["mcp", "add", "myserver", "https://example.com/api?token=abc&format=json#prod"]);
+  assert.equal(r.status, 0, `MCP URL must be forwarded; got stderr: ${r.stderr}`);
+  const recorded = readArgs(d);
+  assert.equal(recorded[0], "mcp");
+  assert.ok(recorded.includes("https://example.com/api?token=abc&format=json#prod"));
+});
+
+test("v0.9.1: /grok:sessions search with `--` terminator allows flag-like text", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "subcmd-list");
+  // POSIX `--` terminator: everything after is literal positional.
+  // Users wanting to search for previous "--timeout" mentions type:
+  //   /grok:sessions search -- --timeout
+  const r = runComp(d, ["sessions", "search", "--", "--timeout"]);
+  assert.equal(r.status, 0, `sessions search via -- terminator must accept flag-like queries; got: ${r.stderr}`);
+  const recorded = readArgs(d);
+  assert.ok(recorded.includes("--timeout"),
+    "the literal `--timeout` must reach grok as a positional argv after `--`");
+});
+
+test("v0.9.1: POSIX `--` terminator collects everything after as positional", () => {
+  const r = parseArgs(["--continue", "--", "--worktree", "task"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS,
+    optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
+  });
+  assert.equal(r.flags.continue, true);
+  // After `--`, both `--worktree` and `task` are literal positionals.
+  assert.deepEqual(r.positional, ["--worktree", "task"]);
+});
+
+test("v0.9.1: /grok:worktree still refuses flag-like positionals (no opt-in for this subcmd)", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "ok-plain");
+  const r = runComp(d, ["worktree", "list", "--bad-flag"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Refusing to forward unknown flag-like/i);
+});
+
+test("v0.9.1 (Grok MED round-1): --timeout passes through subcommand wrappers", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "subcmd-list");
+  // --timeout was in the .md arg-hints but dropped by allowFlags before
+  // v0.9.1. After the fix it's in SUBCMD_BASE_ALLOW for all 4 wrappers.
+  const r = runComp(d, ["worktree", "list", "--timeout", "60s"]);
+  assert.equal(r.status, 0);
+  const recorded = readArgs(d);
+  // Note: --timeout drives spawnSync's timeout AND is forwarded to grok.
+  assert.ok(recorded.includes("--timeout"),
+    "--timeout must be forwarded to grok (was dropped by allowFlags before v0.9.1)");
 });
 
 test("v0.9.0 SECURITY: subcommand passthrough refuses unknown flag-like positionals", t => {

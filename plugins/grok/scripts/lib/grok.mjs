@@ -568,11 +568,18 @@ export function grokBaseArgs({
   // --worktree may be `true` (bare flag, auto-generate name) OR a string
   // name. Validate names same as --agent/--sandbox: short, no control bytes,
   // no path separators (worktree names can't contain `/` per git semantics).
+  // v0.9.1 (Gemini Nit round-1): empty string explicit value
+  // (`--worktree=""`) is no longer silently dropped — the parser
+  // throws on EMPTY_VALUE before this code runs. `false` means the
+  // user explicitly set `--worktree=false` (bool semantics); do not
+  // emit anything.
   if (worktree === true) {
     args.push("--worktree");
-  } else if (worktree != null && worktree !== "") {
+  } else if (worktree === false) {
+    // Explicitly disabled; emit nothing.
+  } else if (worktree != null) {
     const s = String(worktree);
-    if (s.length > 128 || CONTROL_BYTE_STRICT.test(s) || s.includes("/")) {
+    if (s.length === 0 || s.length > 128 || CONTROL_BYTE_STRICT.test(s) || s.includes("/")) {
       throw new Error(`--worktree name invalid: ${s.slice(0, 32)}`);
     }
     args.push("--worktree", s);
@@ -580,11 +587,13 @@ export function grokBaseArgs({
   if (continueSession) args.push("--continue");
   if (resume === true) {
     args.push("--resume");
-  } else if (resume != null && resume !== "") {
+  } else if (resume === false) {
+    // Explicitly disabled; emit nothing.
+  } else if (resume != null) {
     // Session IDs come in many shapes (UUIDs, ULIDs, hex). Be permissive
     // but defuse control-byte / newline injection.
     const s = String(resume);
-    if (s.length > 256 || CONTROL_BYTE_STRICT.test(s)) {
+    if (s.length === 0 || s.length > 256 || CONTROL_BYTE_STRICT.test(s)) {
       throw new Error(`--resume session id invalid: ${s.slice(0, 32)}`);
     }
     args.push("--resume", s);

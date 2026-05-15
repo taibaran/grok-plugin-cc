@@ -46,17 +46,57 @@ export function parseArgs(argv, {
   // overwriting. Required for `--allow`/`--deny`/`--rules` which Grok
   // accepts multiple times.
   repeatableFlags = new Set(),
-  // v0.9.0: optional-value flags. `--flag` alone = true; `--flag value`
-  // or `--flag=value` = the value. Required for Grok's `-w/--worktree
-  // [<NAME>]` and `-r/--resume [<SESSION_ID>]` which both have optional
-  // positional values.
-  optionalValueFlags = new Set()
+  // v0.9.0: optional-value flags. Bare `--flag` = true; ONLY the inline
+  // `--flag=value` form sets a value. v0.9.1 (3/3 reviewer consensus):
+  // we removed the "peek next token" semantics because it ate prompt
+  // tokens (`/grok:ask --worktree how do I fix this?` was making the
+  // worktree named `how` and dropping `how` from the prompt). Require
+  // the explicit `=` form for named values.
+  optionalValueFlags = new Set(),
+  // v0.9.1: short-alias map (Codex round-1: Grok CLI documents -w/-r/-c
+  // but the parser only saw --long forms). Keys are letters (no dash),
+  // values are the long flag name. e.g. `{ w: "worktree", c: "continue" }`.
+  // When the parser sees `-X` it resolves X via this map and processes
+  // as if the user had typed `--<long>`.
+  shortAliases = {}
 } = {}) {
   const tokens = tokenize(argv);
   const flags = {};
   const positional = [];
+  let afterTerminator = false;
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
+    let t = tokens[i];
+    // v0.9.1: POSIX `--` terminator. Once seen, every subsequent token
+    // is a literal positional regardless of its leading dashes. Lets
+    // users search for `--timeout` literally via
+    // `/grok:sessions search -- --timeout` without the parser
+    // intercepting the `--timeout` as a flag.
+    if (afterTerminator) { positional.push(t); continue; }
+    if (t === "--") { afterTerminator = true; continue; }
+    if (!t.startsWith("-")) { positional.push(t); continue; }
+    // v0.9.1 (Codex P2 round-1): short-alias resolution. `-X` where X
+    // is in shortAliases gets rewritten to `--<long>`. `-XY` where X
+    // is in the map: treat as `--<long>=Y` (single-char + value, e.g.
+    // `-rabc-123` → `--resume=abc-123`). `--` and longer `--*` skip
+    // this branch.
+    if (t.length >= 2 && t[0] === "-" && t[1] !== "-") {
+      const ch = t[1];
+      if (shortAliases[ch]) {
+        const longName = shortAliases[ch];
+        if (t.length === 2) {
+          t = `--${longName}`;
+        } else if (t[2] === "=") {
+          t = `--${longName}${t.slice(2)}`;  // include the =value
+        } else {
+          // Bundle form: `-rabc` → `--resume=abc`
+          t = `--${longName}=${t.slice(2)}`;
+        }
+      } else {
+        // Unknown short flag → fall through to positional (existing behavior).
+        positional.push(t);
+        continue;
+      }
+    }
     if (!t.startsWith("--")) { positional.push(t); continue; }
     // v0.8.1 (Codex P3): split on FIRST `=` only. The old code used
     // `t.slice(2).split("=", 2)` which silently DROPS any tokens
@@ -89,20 +129,26 @@ export function parseArgs(argv, {
       continue;
     }
     if (optionalValueFlags.has(rawKey)) {
-      // v0.9.0: optional-value flags. If the user passed inline (`--flag=v`),
-      // that's the value. Otherwise peek at the next token: if it exists
-      // and doesn't start with `--`, take it as the value; otherwise this
-      // is a bare flag (value === true).
-      if (inline !== undefined) {
-        flags[rawKey] = inline;
+      // v0.9.1 (3/3 reviewer consensus round-1): the v0.9.0 peek-ahead
+      // semantics ate prompt tokens (`/grok:ask --worktree how do I
+      // fix this?` named the worktree "how" and dropped that word
+      // from the prompt). New contract:
+      //   --flag           → true (bool form)
+      //   --flag=value     → value (only inline form sets a value)
+      //   --flag=          → throw (explicit user intent to clear is
+      //                      ambiguous; ask them to pick true vs a value)
+      //   --flag=false     → false (matches bool-flag semantics)
+      // Users wanting named worktree/resume must use the `=` form.
+      if (inline === undefined) {
+        flags[rawKey] = true;
+      } else if (inline === "") {
+        const err = new Error(`Empty value for --${rawKey}. Use --${rawKey} for bool form, or --${rawKey}=<value> for a named value.`);
+        err.code = "EMPTY_VALUE";
+        throw err;
+      } else if (inline === "false") {
+        flags[rawKey] = false;
       } else {
-        const next = tokens[i + 1];
-        if (next !== undefined && !next.startsWith("--")) {
-          flags[rawKey] = next;
-          i++;
-        } else {
-          flags[rawKey] = true;
-        }
+        flags[rawKey] = inline;
       }
       continue;
     }
@@ -164,12 +210,30 @@ export const COMMON_REPEATABLE_FLAGS = new Set([
 
 // v0.9.0: optional-value flags. Grok's CLI exposes `-w, --worktree
 // [<NAME>]` and `-r, --resume [<SESSION_ID>]` — both accept either no
-// value (auto-generate / most-recent) OR a positional value. The parser
-// classifies the next token as a value when it doesn't start with `--`.
+// value (auto-generate / most-recent) OR an inline value.
+// v0.9.1 (3/3 reviewer consensus round-1): named form requires the
+// `=` syntax (`--worktree=feature-x`); bare `--worktree` is always
+// bool. The previous peek-ahead behavior corrupted prompts.
 export const COMMON_OPTIONAL_VALUE_FLAGS = new Set([
-  "worktree",             // --worktree [<name>]: start session in new git worktree
-  "resume"                // --resume [<session-id>]: resume by id, or most-recent if omitted
+  "worktree",             // --worktree [bool] | --worktree=<name>
+  "resume"                // --resume   [bool] | --resume=<session-id>
 ]);
+
+// v0.9.1 (Codex P2 round-1): short-flag aliases used by Grok's CLI.
+// The parser used to ignore single-dash flags entirely, dropping
+// `/grok:ask -r abc prompt` into positional and losing the resume
+// session id. With this map, `-r abc` rewrites to `--resume=abc` —
+// matching grok's documented short forms (-w/--worktree, -r/--resume,
+// -c/--continue, -m/--model, -p/--single).
+export const COMMON_SHORT_ALIASES = {
+  w: "worktree",
+  r: "resume",
+  c: "continue",
+  m: "model"
+  // Intentionally NOT mapping -p (Grok's `-p/--single`): the plugin
+  // never exposes the single-prompt form to slash commands at this
+  // level — the companion always builds it internally.
+};
 
 // Parse a duration string. Accepts "30d", "12h", "45m", "60s", "500ms", or a
 // plain integer treated as ms for backward compatibility. Returns ms, or null

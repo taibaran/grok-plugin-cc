@@ -194,6 +194,60 @@ test("v0.8.8 (Gemini Nit + Grok M2 round-9): entry-point guard uses fs.realpathS
     "_invokedAs must use realpathSync to handle symlinks");
 });
 
+test("v0.8.9 (Grok MED #1 round-10): behavioral coverage of budget guard logic", async () => {
+  // Round-10 Grok MED: the v0.8.8 fix was only source-grep verified.
+  // Add explicit behavioral coverage of the THREE distinct cases the
+  // guard must handle:
+  //   (a) user-unbounded (timeoutMs===0) → budget=0 → must NOT skip
+  //   (b) positive timeout, exhausted    → budget=0 → MUST skip
+  //   (c) positive timeout, healthy      → budget>=min → must NOT skip
+  const {
+    remainingBudgetMs, FALLBACK_MIN_BUDGET_MS
+  } = await import("../plugins/grok/scripts/companion.mjs");
+
+  // Helper that mirrors the call-site guard logic verbatim — keep it
+  // in sync with cmdAggregateReview's `!userUnbounded && budget < MIN`.
+  const guardSkips = (timeoutMs, elapsed) => {
+    const userUnbounded = timeoutMs === 0;
+    const budget = remainingBudgetMs(timeoutMs, elapsed);
+    return !userUnbounded && budget < FALLBACK_MIN_BUDGET_MS;
+  };
+
+  // (a) user-unbounded with massive elapsed must NOT skip
+  assert.equal(guardSkips(0, 999999), false,
+    "timeoutMs===0 sentinel must always pass the guard regardless of elapsed");
+
+  // (b) exhausted positive budget MUST skip — the v0.8.7 bug
+  assert.equal(guardSkips(10000, 12000), true,
+    "positive timeout that's been over-elapsed must skip (budget=0)");
+  assert.equal(guardSkips(5000, 5000), true,
+    "positive timeout exactly elapsed must skip");
+
+  // (c) positive timeout with healthy budget must NOT skip
+  assert.equal(guardSkips(60000, 1000), false,
+    "positive timeout with 59s remaining must NOT skip");
+  // Edge: budget exactly equals min — must NOT skip (< not <=)
+  assert.equal(guardSkips(FALLBACK_MIN_BUDGET_MS, 0), false,
+    "budget == FALLBACK_MIN_BUDGET_MS must NOT skip (strict <)");
+  assert.equal(guardSkips(FALLBACK_MIN_BUDGET_MS + 1, 0), false);
+  // Edge: budget just below min — MUST skip
+  assert.equal(guardSkips(FALLBACK_MIN_BUDGET_MS - 1, 0), true);
+});
+
+test("v0.8.9 (Grok MED #2 round-10): both realpath fallbacks resolve to path.resolve", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // Both _entryPath and _invokedAs must fall back via path.resolve()
+  // on realpath failure so they stay normalized-equivalent.
+  const block = src.slice(
+    src.indexOf("v0.8.7: only auto-run main"),
+    src.indexOf("if (_invokedAs === _entryPath)")
+  );
+  // Two arrow IIFEs, each ending in a `catch { return path.resolve(...) }`.
+  const fallbacks = block.match(/catch\s*{\s*return\s+path\.resolve\(/g) || [];
+  assert.equal(fallbacks.length, 2,
+    "both _entryPath and _invokedAs must fall back via path.resolve on realpath failure");
+});
+
 test("v0.8.7 (Grok L5 round-8): dead startedAt alias removed", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   assert.equal(src.includes("const startedAt = startedAtMs"), false,

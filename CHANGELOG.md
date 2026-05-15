@@ -5,6 +5,51 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9] - 2026-05-15
+
+`/goal` round-10 was the **first round with no correctness findings** —
+Codex came back CLEAN, Gemini found 1 stylistic nit, Grok found 2
+medium-cosmetic + 3 low. This release applies the medium fixes.
+
+### Cleanups (no functional changes)
+
+- **Gemini Nit — `import` declaration at top of file**. Moved
+  `fileURLToPath` from the bottom-of-file inline `import` to the
+  module-header import block alongside `fs`, `path`, `os`, `spawn*`,
+  `randomBytes`. Stylistic only — ES module imports were already
+  hoisted at runtime.
+
+- **Grok MED #2 — symmetric realpath fallbacks**. The v0.8.8 entry
+  guard's `_entryPath` IIFE fell back to the raw `p` on realpath
+  failure, while `_invokedAs` fell back to `path.resolve(...)`. Under
+  the (rare) dual-realpath-failure case, the comparison could
+  silently fail-mismatch on a case-insensitive macOS volume. **Fix**:
+  both branches now fall back via `path.resolve` so the comparison
+  stays normalized-equivalent end-to-end. The safe failure mode is
+  still "main() doesn't auto-run on import."
+
+- **Grok LOW #3 — skip-message wording**. When `budget === 0` from
+  positive-timeout overrun, the v0.8.7/v0.8.8 wording said
+  "insufficient remaining timeout budget (0ms < 2000ms)" — technically
+  correct but reads oddly. v0.8.9: distinguishes
+  "timeout budget exhausted" (budget=0) from
+  "timeout budget Xms < 2000ms" (positive but tiny).
+
+### Tests
+
+- 2 new behavioral tests (Grok MED #1 round-10): explicit coverage of
+  the three guard cases — user-unbounded, exhausted positive,
+  healthy positive — at edge boundaries (==MIN, MIN-1, exactly
+  elapsed, etc.).
+- Total suite: 281 passing.
+
+### Notes for the user
+
+This is the cleanest round of the v0.8.x `/goal` loop yet. Round-11
+should confirm convergence. After that we move to **v0.9.0**
+(`--sandbox`, `--worktree`, `--continue`/`--resume`, `grok sessions`,
+`grok mcp`, memory management).
+
 ## [0.8.8] - 2026-05-15
 
 `/goal` round-9 — 3/3 reviewer consensus on a single CRITICAL bug

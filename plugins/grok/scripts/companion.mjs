@@ -13,6 +13,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, parseDuration } from "./lib/args.mjs";
 import {
@@ -1983,9 +1984,13 @@ async function cmdAggregateReview({ flags, positional }) {
         const userUnbounded = timeoutMs === 0;
         const budget = remainingBudgetMs(timeoutMs, r.elapsedMs);
         if (!userUnbounded && budget < FALLBACK_MIN_BUDGET_MS) {
+          // v0.8.9 (Grok LOW #3 round-10): distinguish overrun (budget=0)
+          // from low-positive ("insufficient"). "Exhausted" reads more
+          // accurately when budget === 0 from elapsed >= timeoutMs.
+          const reason = budget === 0 ? "exhausted" : `${budget}ms < ${FALLBACK_MIN_BUDGET_MS}ms`;
           process.stdout.write(
-            `[grok-plugin] ${spec.name}: insufficient remaining timeout ` +
-            `budget (${budget}ms < ${FALLBACK_MIN_BUDGET_MS}ms) — keeping peer result.\n\n`
+            `[grok-plugin] ${spec.name}: timeout budget ${reason} ` +
+            `— keeping peer result.\n\n`
           );
           return null;
         }
@@ -2156,14 +2161,19 @@ async function main() {
 // shouldFallbackToCli / remainingBudgetMs directly; without this
 // guard, every import would trigger main() → usage error → exit 2.
 //
-// v0.8.8 (Gemini Nit + Grok MED #2 round-9): resolve both sides
-// through `fs.realpathSync` so symlinks (e.g. plugin cache symlinks
-// in Claude Code, npm `.bin/` shims, case-insensitive macOS volumes)
+// v0.8.8: resolve through fs.realpathSync so symlinks (Claude Code
+// plugin cache, npm `.bin/` shims, case-insensitive macOS volumes)
 // don't cause the legitimate-entry comparison to falsely fail.
-import { fileURLToPath as _fileURLToPath } from "node:url";
+//
+// v0.8.9 (Grok MED #2 round-10): both fallback branches now use
+// path.resolve so the comparison stays consistent even when realpath
+// fails on both sides. Worst case: a symlinked invocation with both
+// realpath calls failing falls back to path.resolve on both, which
+// still gives consistent normalization. The safe failure mode is
+// "main() doesn't auto-run on import" — never the inverse.
 const _entryPath = (() => {
-  const p = _fileURLToPath(import.meta.url);
-  try { return fs.realpathSync(p); } catch { return p; }
+  const p = fileURLToPath(import.meta.url);
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
 })();
 const _invokedAs = (() => {
   if (!process.argv[1]) return null;

@@ -14,7 +14,7 @@ import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, parseDuration } from 
 import {
   ensureDir, jobsDir, newJobId,
   writeJobMeta, readJobMeta, listJobs, pruneJobs,
-  readConfig, setReviewGate, safeJobLogPath, purgeJobs, setActiveModel
+  readConfig, setReviewGate, safeJobLogPath, readBoundedJobLog, purgeJobs, setActiveModel
 } from "./lib/state.mjs";
 import { isAlive, terminateProcessTree } from "./lib/process.mjs";
 import { captureDiff } from "./lib/git.mjs";
@@ -22,18 +22,36 @@ import {
   which, grokVersion, classifyAuthBlob,
   detectAuthSource, grokBaseArgs, effectiveModel, DEFAULT_MODEL,
   cleanGrokEnv, probeWithFallback, checkMinVersion, MIN_GROK_VERSION,
-  MODEL_FALLBACK_CHAIN, capabilityProbe
+  MODEL_FALLBACK_CHAIN, capabilityProbe,
+  parseGrokJson, writePromptToTempFile
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal } from "./lib/render.mjs";
-import { findLastJsonObject } from "./lib/verdict.mjs";
 
 // Conservative timeouts. Override with `--timeout <duration>`, or pass
-// `--timeout 0` to disable. Task has no default — rescue work is open-ended
-// by design and the user can /grok:cancel a stuck job.
+// `--timeout 0` to disable.
+//
+// The task default was 0 (unbounded) through v0.4.0 — rescue work is
+// open-ended by design and the user can /grok:cancel a stuck job. The
+// v0.5.0 review (Gemini) flagged this as a disk-DoS amplifier: an
+// adversarial prompt trapping Grok in an output loop will silently fill
+// the host's filesystem with no upper bound. The default is now 2 hours
+// — well above any legitimate rescue I have seen in production
+// (multi-step refactors, deep multi-file investigation) but a hard
+// backstop against runaway agents. Users can still pass `--timeout 0`
+// to opt back into unbounded behavior when they know the workload.
 const DEFAULT_ASK_TIMEOUT_MS = 5 * 60 * 1000;       // 5 min
 const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60 * 1000;   // 20 min
-const DEFAULT_TASK_TIMEOUT_MS = 0;                  // unbounded
+const DEFAULT_TASK_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+// Hard cap on per-job on-disk stdout/stderr size. Without this, an
+// adversarial prompt trapping Grok in an infinite output loop would fill
+// the host filesystem before the timeout (or cancel) fires. 500 MiB is
+// generous for any legitimate run (a long review streams a few MB of
+// reasoning at most) while making host-OS DoS structurally impossible.
+// On overflow we kill the process tree and mark the job failed; the
+// truncated log is preserved for postmortem.
+const MAX_JOB_LOG_BYTES = 500 * 1024 * 1024;
 
 // Default max-turns budgets. The probe-time discovery (~/.grok/README +
 // hands-on testing) showed Grok consumes ~4 internal messages even for a
@@ -86,71 +104,16 @@ function validateEffort(effort) {
   return e;
 }
 
-// Grok does not consume stdin in headless mode (`-p`). For payloads larger
-// than what we want to put on the command line (reviews with a multi-MB
-// diff), write the prompt to a temp file and use `--prompt-file <path>`.
-// Returns the temp path; caller is responsible for unlinking when done.
-//
-// Retries on EEXIST: O_EXCL gives us per-attempt symlink defense, but the
-// 48-bit random suffix + millisecond timestamp is not collision-free under
-// concurrent review/gate activity. A small retry loop is enough to make the
-// collision case quiet rather than fatal.
-function writePromptToTempFile(prompt) {
-  const dir = os.tmpdir();
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const name = `grok-prompt-${Date.now()}-${randomBytes(12).toString("hex")}.txt`;
-    const p = path.join(dir, name);
-    let fd;
-    try {
-      // O_EXCL: refuse to overwrite a pre-planted symlink in tmp.
-      fd = fs.openSync(p, "wx", 0o600);
-    } catch (e) {
-      if (e && e.code === "EEXIST") continue;
-      throw e;
-    }
-    try { fs.writeSync(fd, prompt); }
-    finally { fs.closeSync(fd); }
-    return p;
-  }
-  throw new Error("writePromptToTempFile: exhausted retries trying to find a free name");
-}
+// writePromptToTempFile moved to lib/grok.mjs in v0.5.0 (was duplicated
+// here and in stop-review-gate-hook.mjs). Imported above.
 
 function safeUnlink(p) {
   try { fs.unlinkSync(p); } catch {}
 }
 
-// Bounded file read for /grok:result. Reads up to `maxBytes` from the
-// START of the file (vs the stop-gate's tail-read, which is targeting the
-// final JSON envelope). For result display we WANT the early bytes —
-// that's where the user's textual response will be. Returns the string,
-// or null if the file cannot be read (refusal is communicated to the
-// caller, not surfaced as an exception).
-function readBoundedFile(filePath, maxBytes) {
-  let stat;
-  try { stat = fs.statSync(filePath); }
-  catch { return null; }
-  if (!stat.isFile()) return null;
-  const size = Math.min(stat.size, maxBytes);
-  if (size === 0) return "";
-  const buf = Buffer.alloc(size);
-  let fd;
-  try {
-    fd = fs.openSync(filePath, "r");
-    fs.readSync(fd, buf, 0, size, 0);
-  } catch { return null; }
-  finally {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch {}
-    }
-  }
-  const text = buf.toString("utf8");
-  // If we truncated, add a marker line so the user knows the display is
-  // partial. The on-disk file is still complete.
-  if (stat.size > maxBytes) {
-    return text + `\n\n[... output truncated by grok-plugin: ${stat.size - maxBytes} bytes omitted; full output remains at ${filePath}]\n`;
-  }
-  return text;
-}
+// readBoundedFile removed in v0.5.0 — replaced by `readBoundedJobLog` in
+// lib/state.mjs, which is TOCTOU-safe via O_NOFOLLOW + fstat on a single
+// fd. cmdResult is the only caller, and it now uses readBoundedJobLog.
 
 // Validate that a path Grok claimed to write (an image / video output)
 // is safe to print to the user's terminal as part of an `open <path>`
@@ -303,51 +266,9 @@ function cmdSetup({ flags }) {
 
 // ---------- subcommand: ask ----------
 
-// Parse Grok's --output-format json envelope. Shape:
-//   success: { text, stopReason, sessionId, requestId, thought? }
-//   error:   { type: "error", message }
-// Returns { kind: "text" | "error" | "unknown", text, message, sessionId } where
-// unknown means the payload could not be parsed as either shape.
-//
-// Two defense layers, matching stop-review-gate-hook.mjs's parser:
-//   1. Strip ANSI / OSC / DCS / C0 controls (`sanitizeForTerminal`) — Grok
-//      normally emits clean JSON on stdout, but its Rust tracing layer can
-//      leak colored log lines that would otherwise break JSON.parse.
-//   2. If the whole blob doesn't parse, fall back to scanning for the
-//      LAST balanced JSON object (`findLastJsonObject` from verdict.mjs).
-//      Grok's envelope is by contract the final JSON emitted, so the
-//      last-object scan handles streamed `thought` text, tracing prefixes,
-//      and any other noise that could trail or precede the envelope.
-//      Previously this fallback existed only in the stop-gate hook; ask
-//      and review used the strict whole-blob parse, so a single stray
-//      escape between the envelope and EOF silently flipped errors to
-//      "unknown" and exit-0-with-error envelopes to "completed".
-function parseGrokJson(raw) {
-  if (!raw) return { kind: "unknown" };
-  const clean = sanitizeForTerminal(raw).trim();
-  if (!clean) return { kind: "unknown" };
-  // Fast path: the common case is the whole blob IS the envelope.
-  let parsed = null;
-  try { parsed = JSON.parse(clean); } catch {}
-  if (!parsed || typeof parsed !== "object") {
-    // Slow path: scan for the last balanced object. Catches noisy prefixes
-    // and trailing junk.
-    parsed = findLastJsonObject(clean);
-  }
-  if (!parsed || typeof parsed !== "object") return { kind: "unknown" };
-  if (parsed.type === "error") {
-    return { kind: "error", message: parsed.message || "" };
-  }
-  if (typeof parsed.text === "string") {
-    return {
-      kind: "text",
-      text: parsed.text,
-      sessionId: parsed.sessionId || null,
-      stopReason: parsed.stopReason || null
-    };
-  }
-  return { kind: "unknown" };
-}
+// parseGrokJson moved to lib/grok.mjs in v0.5.0 (was here in companion
+// AND in stop-review-gate-hook.mjs::parseGrokJsonEnvelope). Imported
+// above. The two-parser drift Codex flagged is closed.
 
 function cmdAsk({ flags, positional }) {
   const prompt = positional.join(" ").trim();
@@ -432,6 +353,9 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
     const sanitizer = new TerminalSanitizer();
 
     let timedOut = false;
+    let diskOverflowed = false;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let timeoutTimer = null;
     if (timeoutMs > 0) {
       timeoutTimer = setTimeout(() => {
@@ -444,12 +368,41 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
       }, timeoutMs);
     }
 
+    // Trigger when the combined stdout+stderr on-disk size exceeds the
+    // cap. Mark status BEFORE killing the process so the close handler
+    // sees "disk-overflow" and doesn't race-overwrite it with "failed".
+    // Mirrors the timeout-timer pattern.
+    function tripDiskOverflow() {
+      if (diskOverflowed) return;
+      diskOverflowed = true;
+      meta.status = "disk-overflow";
+      meta.ended_at = new Date().toISOString();
+      meta.error = `on-disk log exceeded ${MAX_JOB_LOG_BYTES} bytes; process killed to protect filesystem`;
+      try { writeJobMeta(meta.id, meta); } catch {}
+      terminateProcessTree(proc.pid).catch(() => {});
+    }
+
     proc.stdout.on("data", d => {
       // setEncoding("utf8") above means `d` is already a UTF-8-safe
       // string (decoded with an internal StringDecoder that buffers
       // incomplete sequences across chunks). We still need to write to
       // disk — fs.writeSync accepts strings and writes them as utf8 by
       // default, so the on-disk log stays byte-accurate.
+      const bytes = Buffer.byteLength(d, "utf8");
+      if (stdoutBytes + stderrBytes + bytes > MAX_JOB_LOG_BYTES) {
+        // Write what we can fit, then trip overflow. The trailing
+        // truncation marker lets postmortem readers tell why the log
+        // stops mid-stream.
+        const remaining = MAX_JOB_LOG_BYTES - stdoutBytes - stderrBytes;
+        if (remaining > 0) {
+          try { fs.writeSync(stdoutFd, d.slice(0, remaining)); } catch {}
+          stdoutBytes += remaining;
+        }
+        try { fs.writeSync(stdoutFd, `\n[grok-plugin] LOG CAP HIT — process terminated to protect filesystem (${MAX_JOB_LOG_BYTES} bytes)\n`); } catch {}
+        tripDiskOverflow();
+        return;
+      }
+      stdoutBytes += bytes;
       fs.writeSync(stdoutFd, d);
       if (showStdout) {
         const safe = sanitizer.push(d);
@@ -460,7 +413,18 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
       }
     });
     proc.stderr.on("data", d => {
-      // Same setEncoding contract — `d` is a string.
+      const bytes = Buffer.byteLength(d, "utf8");
+      if (stdoutBytes + stderrBytes + bytes > MAX_JOB_LOG_BYTES) {
+        const remaining = MAX_JOB_LOG_BYTES - stdoutBytes - stderrBytes;
+        if (remaining > 0) {
+          try { fs.writeSync(stderrFd, d.slice(0, remaining)); } catch {}
+          stderrBytes += remaining;
+        }
+        try { fs.writeSync(stderrFd, `\n[grok-plugin] LOG CAP HIT — process terminated to protect filesystem\n`); } catch {}
+        tripDiskOverflow();
+        return;
+      }
+      stderrBytes += bytes;
       fs.writeSync(stderrFd, d);
       if (errBuf.length < MAX_JOB_BUF) {
         errBuf += d.slice(0, MAX_JOB_BUF - errBuf.length);
@@ -498,7 +462,7 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
       }
       const grokInternalError = parsedOut.kind === "error";
 
-      if (current.status === "cancelled" || current.status === "timed-out") {
+      if (current.status === "cancelled" || current.status === "timed-out" || current.status === "disk-overflow") {
         current.exit_code = code;
         writeJobMeta(meta.id, current);
         meta.status = current.status;
@@ -520,13 +484,15 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
 
       if (timedOut) {
         process.stderr.write(`\n[grok-plugin] Job ${meta.id} timed out after ${timeoutMs}ms. Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 30m.\n`);
+      } else if (diskOverflowed) {
+        process.stderr.write(`\n[grok-plugin] Job ${meta.id} terminated: on-disk log exceeded ${MAX_JOB_LOG_BYTES} bytes. The log was truncated at the cap; full output was not captured. Check the prompt — Grok was likely in an output loop.\n`);
       } else if ((code !== 0 || grokInternalError) && meta.status !== "cancelled") {
         if (errBuf) process.stderr.write(sanitizeForTerminal(errBuf));
         const why = classifyAuthBlob(outBuf + "\n" + errBuf);
         if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
       }
 
-      resolve({ code, outBuf, errBuf, timedOut, parsedOut });
+      resolve({ code, outBuf, errBuf, timedOut, diskOverflowed, parsedOut });
     });
 
     proc.on("error", err => {
@@ -1035,38 +1001,29 @@ function cmdResult({ positional }) {
   if (meta.exit_code !== undefined) console.log(`Exit: ${meta.exit_code}`);
   if (meta.session_id) console.log(`Session: ${meta.session_id}  (resume: grok -r ${meta.session_id})`);
   console.log("\n## Output\n");
-  const safeOut = safeJobLogPath(meta.stdout_path);
-  if (!safeOut) {
-    console.log("(stdout path is outside the jobs directory - refusing to read)");
+  // v0.5.0: switched from `safeJobLogPath` + `readBoundedFile` to
+  // `readBoundedJobLog` which atomically validates + opens + reads
+  // through a single fd with O_NOFOLLOW. Closes the TOCTOU race window
+  // where an attacker could swap a job log for a symlink between the
+  // path validation and the open.
+  const raw = readBoundedJobLog(meta.stdout_path, undefined, MAX_REVIEW_JSON_BYTES);
+  if (raw === null) {
+    console.log("(stdout path is outside the jobs directory or could not be safely read)");
   } else {
-    // Bound the read at MAX_REVIEW_JSON_BYTES so a runaway job that
-    // wrote multi-GB stdout can't OOM /grok:result. The on-disk file
-    // remains uncapped for forensic use.
-    const raw = readBoundedFile(safeOut, MAX_REVIEW_JSON_BYTES);
-    if (raw === null) {
-      console.log(`(could not read stdout)`);
+    const parsed = parseGrokJson(raw);
+    if (parsed.kind === "text") {
+      process.stdout.write(sanitizeForTerminal(parsed.text + "\n"));
+    } else if (parsed.kind === "error") {
+      process.stdout.write(sanitizeForTerminal(`(grok internal error) ${parsed.message}\n`));
     } else {
-      // If the captured output was JSON, render the inner text; otherwise raw.
-      const parsed = parseGrokJson(raw);
-      if (parsed.kind === "text") {
-        process.stdout.write(sanitizeForTerminal(parsed.text + "\n"));
-      } else if (parsed.kind === "error") {
-        process.stdout.write(sanitizeForTerminal(`(grok internal error) ${parsed.message}\n`));
-      } else {
-        process.stdout.write(sanitizeForTerminal(raw || "(no output)\n"));
-      }
+      process.stdout.write(sanitizeForTerminal(raw || "(no output)\n"));
     }
   }
   if (meta.exit_code && meta.exit_code !== 0) {
     console.log("\n## Errors\n");
-    const safeErr = safeJobLogPath(meta.stderr_path);
-    if (safeErr) {
-      // Same bound applies to stderr — a misbehaving Grok could fill
-      // either stream.
-      const errRaw = readBoundedFile(safeErr, MAX_REVIEW_JSON_BYTES);
-      if (errRaw !== null) {
-        process.stdout.write(sanitizeForTerminal(errRaw));
-      }
+    const errRaw = readBoundedJobLog(meta.stderr_path, undefined, MAX_REVIEW_JSON_BYTES);
+    if (errRaw !== null) {
+      process.stdout.write(sanitizeForTerminal(errRaw));
     }
   }
   console.log(`\n---\nFollow-up: /grok:status ${meta.id}`);

@@ -78,20 +78,15 @@ test("readBoundedStdout reads the TAIL of files larger than the cap (Gemini find
     "fs.readSync in readBoundedStdout must pass the tail position");
 });
 
-test("parseGrokJsonEnvelope picks the LAST balanced JSON object", () => {
-  // Source-level assertion: the function must use the shared
-  // `findLastJsonObject` helper (from lib/verdict.mjs) as its slow path,
-  // after a fast JSON.parse on the whole blob. The "last balanced object"
-  // semantics live in findLastJsonObject itself; this test pins that the
-  // hook uses the shared helper rather than reimplementing the scan.
+test("stop-review-gate-hook uses shared parseGrokJson (v0.5.0 unification)", () => {
+  // v0.5.0 unified parsing: stop-review-gate-hook no longer has its own
+  // parseGrokJsonEnvelope. It imports the shared `parseGrokJson` from
+  // lib/grok.mjs (same envelope shape, same defenses, no drift).
   const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
-  assert.match(src, /function parseGrokJsonEnvelope\(/);
-  const start = src.indexOf("function parseGrokJsonEnvelope(");
-  const slice = src.slice(start, start + 2500);
-  // Must call the shared helper.
-  assert.match(slice, /findLastJsonObject\(/);
-  // And the import must be present at the top of the file.
-  assert.match(src, /import\s*\{[^}]*findLastJsonObject[^}]*\}\s*from\s*"\.\/lib\/verdict\.mjs"/);
+  assert.match(src, /import\s*\{[^}]*parseGrokJson[^}]*\}\s*from\s*"\.\/lib\/grok\.mjs"/,
+    "stop-gate must import parseGrokJson from lib/grok.mjs");
+  assert.match(src, /parsedEnvelope\s*=\s*parseGrokJson\(stdoutContent\)/,
+    "stop-gate must call parseGrokJson on the captured stdout");
 });
 
 // End-to-end against a real on-disk tail. We can't easily exercise

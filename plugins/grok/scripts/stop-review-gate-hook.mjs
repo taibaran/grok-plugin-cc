@@ -21,12 +21,11 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 import { readConfig } from "./lib/state.mjs";
-import { which, classifyAuthBlob, grokBaseArgs, cleanGrokEnv } from "./lib/grok.mjs";
+import { which, classifyAuthBlob, grokBaseArgs, cleanGrokEnv, parseGrokJson, writePromptToTempFile } from "./lib/grok.mjs";
 import { captureDiff } from "./lib/git.mjs";
 import { buildStopGatePrompt } from "./lib/prompts.mjs";
-import { parseVerdict, findLastJsonObject } from "./lib/verdict.mjs";
+import { parseVerdict } from "./lib/verdict.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
-import { sanitizeForTerminal } from "./lib/render.mjs";
 
 const HOOK_TIMEOUT_MS = 12 * 60 * 1000;
 
@@ -84,45 +83,17 @@ function extractClaudeResponse(hookInput) {
   }
 }
 
-// Retry on EEXIST mirrors companion.mjs::writePromptToTempFile — the 48-bit
-// random suffix is not collision-free under concurrent hook activity.
-function writePromptToTempFile(prompt) {
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const p = path.join(os.tmpdir(), `grok-gate-${Date.now()}-${randomBytes(12).toString("hex")}.txt`);
-    let fd;
-    try { fd = fs.openSync(p, "wx", 0o600); }
-    catch (e) {
-      if (e && e.code === "EEXIST") continue;
-      throw e;
-    }
-    try { fs.writeSync(fd, prompt); }
-    finally { fs.closeSync(fd); }
-    return p;
-  }
-  throw new Error("writePromptToTempFile: exhausted retries");
-}
-
 function safeUnlink(p) {
   try { fs.unlinkSync(p); } catch {}
 }
 
-// Extract Grok's `--output-format json` envelope from raw stdout.
+// v0.5.0: parseGrokJsonEnvelope replaced by the shared `parseGrokJson`
+// from lib/grok.mjs. Same envelope shape, same defense layers, single
+// source of truth. The old wrapper here returned the raw parsed object;
+// callers now use parseGrokJson's tagged-union shape ({kind, ...}).
 //
-// Two layers of defense:
-//   1. ANSI / OSC / DCS / C0 stripping (`sanitizeForTerminal`).
-//   2. LAST-balanced-object extraction via the shared `findLastJsonObject`
-//      helper in lib/verdict.mjs. Shared with companion.mjs::parseGrokJson
-//      so the two parsers cannot drift over time.
-function parseGrokJsonEnvelope(raw) {
-  if (!raw) return null;
-  const clean = sanitizeForTerminal(raw).trim();
-  if (!clean) return null;
-  try {
-    const parsed = JSON.parse(clean);
-    if (parsed && typeof parsed === "object") return parsed;
-  } catch {}
-  return findLastJsonObject(clean);
-}
+// writePromptToTempFile likewise moved to lib/grok.mjs and is imported
+// at the top of this file.
 
 // Same temp-file pattern as the prompt file. The grok stdout could be
 // several MB if it streams thoughts before the final JSON envelope, so we
@@ -210,7 +181,9 @@ function main() {
   }
 
   const prompt = buildStopGatePrompt({ claudeResponse, diff: diffResult.diff });
-  const promptFile = writePromptToTempFile(prompt);
+  // `grok-gate` prefix distinguishes hook-time temp files from the
+  // companion's `grok-prompt` prefix in postmortem inspection of /tmp.
+  const promptFile = writePromptToTempFile(prompt, "grok-gate");
 
   // Tee stdout to a temp file so we can read the full envelope on close,
   // not just the first 256 KiB. Without this, a Grok run that emits a long
@@ -306,10 +279,13 @@ function main() {
       emitInfraFailure(`review gate skipped (${why})`);
       return;
     }
-    // Grok returns exit 0 even on internal error; check for the error envelope.
-    const envelope = parseGrokJsonEnvelope(stdoutContent);
-    if (envelope && envelope.type === "error") {
-      emitInfraFailure(`review gate skipped (grok internal error: ${envelope.message})`);
+    // Grok returns exit 0 even on internal error; check for the error
+    // envelope. v0.5.0 uses the shared parseGrokJson from lib/grok.mjs
+    // (same envelope shape, same defenses; no drift between companion
+    // and stop-gate).
+    const parsedEnvelope = parseGrokJson(stdoutContent);
+    if (parsedEnvelope.kind === "error") {
+      emitInfraFailure(`review gate skipped (grok internal error: ${parsedEnvelope.message})`);
       return;
     }
     if (code !== 0) {
@@ -318,7 +294,7 @@ function main() {
     }
     // Extract the inner text from the JSON envelope, then parse the verdict
     // out of it. We accept a bare JSON or a ```json fenced block.
-    const innerText = envelope && typeof envelope.text === "string" ? envelope.text : stdoutContent;
+    const innerText = parsedEnvelope.kind === "text" ? parsedEnvelope.text : stdoutContent;
     const verdict = parseVerdict(innerText);
     if (!verdict) {
       emitInfraFailure(`review gate verdict unparseable (raw: ${(innerText || "").trim().slice(0, 80)})`);

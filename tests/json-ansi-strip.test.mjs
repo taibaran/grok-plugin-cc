@@ -18,51 +18,46 @@ import fs from "node:fs";
 const COMPANION_PATH = new URL("../plugins/grok/scripts/companion.mjs", import.meta.url).pathname;
 const STOP_GATE_PATH = new URL("../plugins/grok/scripts/stop-review-gate-hook.mjs", import.meta.url).pathname;
 
-test("companion.mjs parseGrokJson sanitizes before JSON.parse", () => {
-  const src = fs.readFileSync(COMPANION_PATH, "utf8");
-  // The function must (a) call sanitizeForTerminal and (b) feed the cleaned
-  // string into JSON.parse, not the raw blob.
-  assert.match(src, /function parseGrokJson\(/);
-  // Look for sanitizeForTerminal usage WITHIN ~30 lines of parseGrokJson.
-  const start = src.indexOf("function parseGrokJson(");
-  assert.ok(start >= 0, "parseGrokJson must exist");
+test("lib/grok.mjs parseGrokJson sanitizes before JSON.parse", () => {
+  // v0.5.0 moved parseGrokJson from companion.mjs to lib/grok.mjs.
+  const GROK_LIB_PATH = new URL("../plugins/grok/scripts/lib/grok.mjs", import.meta.url).pathname;
+  const src = fs.readFileSync(GROK_LIB_PATH, "utf8");
+  assert.match(src, /export function parseGrokJson\(/);
+  const start = src.indexOf("export function parseGrokJson(");
+  assert.ok(start >= 0, "parseGrokJson must exist in lib/grok.mjs");
   const slice = src.slice(start, start + 2000);
   assert.match(slice, /sanitizeForTerminal\(raw\)/,
     "parseGrokJson must call sanitizeForTerminal(raw) before parsing");
-  assert.match(slice, /JSON\.parse\(\s*clean\s*\)/,
+  assert.match(slice, /JSON\.parse\(clean\)/,
     "parseGrokJson must JSON.parse the sanitized `clean` value, not raw");
 });
 
-test("stop-review-gate-hook.mjs parseGrokJsonEnvelope sanitizes before JSON.parse", () => {
+test("stop-review-gate-hook.mjs uses shared parseGrokJson (which already sanitizes)", () => {
+  // v0.5.0 removed the local parseGrokJsonEnvelope. Stop-gate now uses
+  // the shared parseGrokJson from lib/grok.mjs, which has the
+  // sanitize-before-parse defense built in. We assert the import + call.
   const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
-  assert.match(src, /function parseGrokJsonEnvelope\(/);
-  const start = src.indexOf("function parseGrokJsonEnvelope(");
-  assert.ok(start >= 0);
-  const slice = src.slice(start, start + 2000);
-  assert.match(slice, /sanitizeForTerminal\(raw\)/);
-  assert.match(slice, /JSON\.parse\(\s*clean\s*\)/);
+  assert.match(src, /parseGrokJson/);
+  assert.match(src, /import\s*\{[^}]*parseGrokJson[^}]*\}\s*from\s*"\.\/lib\/grok\.mjs"/);
 });
 
 test("stop-review-gate-hook.mjs writes stdout to a temp file and re-reads at close", () => {
-  // Regression for Gemini's truncation-fail-open bug. The previous version
-  // capped stdout at MAX_HOOK_BUF (256 KiB) in memory; if the verdict
-  // landed after that cap, parsing failed silently and the gate emitted
-  // "allow" by default. The fix tees stdout to disk and reads back the
-  // full file (bounded by MAX_GATE_STDOUT_PARSE_BYTES = 8 MiB) for parse.
+  // Regression for Gemini's truncation-fail-open bug. The fix tees
+  // stdout to disk and reads back the full file (bounded by
+  // MAX_GATE_STDOUT_PARSE_BYTES = 8 MiB) for parse.
   const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
-  assert.match(src, /openStdoutTempFile/,
-    "stop-gate must open a temp file for stdout capture");
-  assert.match(src, /readBoundedStdout/,
-    "stop-gate must read the stdout file back via readBoundedStdout");
-  // Ensure the parse uses the on-disk content, not a 256-KiB in-memory buffer.
-  assert.match(src, /parseGrokJsonEnvelope\(stdoutContent\)/);
+  assert.match(src, /openStdoutTempFile/);
+  assert.match(src, /readBoundedStdout/);
+  // After v0.5.0 unification, parsing goes through the shared parseGrokJson.
+  assert.match(src, /parseGrokJson\(stdoutContent\)/);
 });
 
-test("stop-review-gate-hook.mjs imports sanitizeForTerminal", () => {
+test("stop-review-gate-hook.mjs imports parseGrokJson from lib/grok.mjs", () => {
+  // v0.5.0: the local parseGrokJsonEnvelope was removed and replaced
+  // by the shared lib/grok.mjs::parseGrokJson, which carries the
+  // sanitizer + last-balanced-object defenses we previously duplicated.
   const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
-  // If a future refactor drops the sanitizer import, the parseGrokJsonEnvelope
-  // call becomes a ReferenceError at hook runtime. Lock it down with a test.
-  assert.match(src, /import \{[^}]*sanitizeForTerminal[^}]*\} from "\.\/lib\/render\.mjs"/);
+  assert.match(src, /import \{[^}]*parseGrokJson[^}]*\} from "\.\/lib\/grok\.mjs"/);
 });
 
 test("stop-review-gate-hook.mjs cleans up promptFile if openStdoutTempFile throws (Grok-flagged leak)", () => {

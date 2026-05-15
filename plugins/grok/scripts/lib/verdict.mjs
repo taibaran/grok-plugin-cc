@@ -119,12 +119,24 @@ export function findLastJsonObject(s) {
 
 // Walk a string left-to-right collecting all balanced JSON objects that
 // parse as verdicts. Return the LAST one. Returns null if none matched.
+//
+// Same O(n²) worst-case guard as findLastJsonObject (Codex round-7
+// finding): a wall of `{` chars with no `}` would cause repeated
+// scans-to-EOF. We cap FAILED scans at MAX_FAILED_SCANS_PER_CALL.
+// Legitimate verdict-bearing responses have at most a handful of
+// partial JSON fragments before the real verdict; the cap is generous
+// for production while bounding the worst case at O(n).
 function findLastVerdictInString(s) {
   let last = null;
+  let failures = 0;
   for (let i = 0; i < s.length; i++) {
     if (s[i] !== "{") continue;
     const end = findBalancedJsonEnd(s, i);
-    if (end < 0) continue;
+    if (end < 0) {
+      failures++;
+      if (failures > MAX_FAILED_SCANS_PER_CALL) break;
+      continue;
+    }
     let parsed;
     try { parsed = JSON.parse(s.slice(i, end + 1)); }
     catch { i = end; continue; }

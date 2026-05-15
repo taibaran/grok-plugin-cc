@@ -5,8 +5,14 @@
 // authoritative xAI Grok CLI documentation). Anything that depends on the
 // upstream CLI shape carries a "see README" comment.
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readConfig } from "./state.mjs";
+import { findLastJsonObject } from "./verdict.mjs";
+import { sanitizeForTerminal } from "./render.mjs";
 
 export const AUTH_PROBE_TIMEOUT_MS = 30_000;
 
@@ -340,6 +346,74 @@ export function authProbe(model) {
   }
   const why = classifyAuthBlob(blob);
   return { ok: false, detail: why || "probe failed", raw: blob.slice(0, 400), model: model || effectiveModel() };
+}
+
+// Parse Grok's --output-format json envelope. Shape:
+//   success: { text, stopReason, sessionId, requestId, thought? }
+//   error:   { type: "error", message }
+// Returns { kind: "text" | "error" | "unknown", text, message, sessionId }.
+//
+// Two defense layers:
+//   1. Strip ANSI / OSC / DCS / C0 controls (`sanitizeForTerminal`) —
+//      Grok's Rust tracing layer can leak colored log lines into stdout.
+//   2. Fast path JSON.parse; slow path scans for the LAST balanced JSON
+//      object via the shared `findLastJsonObject` helper.
+//
+// Moved to lib/grok.mjs in v0.5.0 (C6/C9 refactor). Previously this
+// existed verbatim in companion.mjs (used by ask/review/task) AND in
+// stop-review-gate-hook.mjs::parseGrokJsonEnvelope. The two copies
+// were each evolving slightly differently — Codex flagged the drift
+// risk in round 3. Single source of truth now.
+export function parseGrokJson(raw) {
+  if (!raw) return { kind: "unknown" };
+  const clean = sanitizeForTerminal(raw).trim();
+  if (!clean) return { kind: "unknown" };
+  let parsed = null;
+  try { parsed = JSON.parse(clean); } catch {}
+  if (!parsed || typeof parsed !== "object") {
+    parsed = findLastJsonObject(clean);
+  }
+  if (!parsed || typeof parsed !== "object") return { kind: "unknown" };
+  if (parsed.type === "error") {
+    return { kind: "error", message: parsed.message || "" };
+  }
+  if (typeof parsed.text === "string") {
+    return {
+      kind: "text",
+      text: parsed.text,
+      sessionId: parsed.sessionId || null,
+      stopReason: parsed.stopReason || null
+    };
+  }
+  return { kind: "unknown" };
+}
+
+// Write a string to a fresh temp file with `O_EXCL` + 96 bits of
+// randomness, retrying on the (extremely unlikely) EEXIST collision.
+// Returns the absolute path; callers MUST unlink it when done.
+//
+// Used by review/imagine paths (which pass a multi-MB prompt to
+// `grok --prompt-file`) AND by the stop-review-gate hook. Moved to
+// lib/grok.mjs in v0.5.0 (C6 refactor) — previously this same function
+// existed verbatim in companion.mjs AND stop-review-gate-hook.mjs.
+export function writePromptToTempFile(prompt, prefix = "grok-prompt") {
+  const dir = os.tmpdir();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const name = `${prefix}-${Date.now()}-${randomBytes(12).toString("hex")}.txt`;
+    const p = path.join(dir, name);
+    let fd;
+    try {
+      // O_EXCL via "wx" mode: refuse to overwrite a pre-planted symlink.
+      fd = fs.openSync(p, "wx", 0o600);
+    } catch (e) {
+      if (e && e.code === "EEXIST") continue;
+      throw e;
+    }
+    try { fs.writeSync(fd, prompt); }
+    finally { fs.closeSync(fd); }
+    return p;
+  }
+  throw new Error("writePromptToTempFile: exhausted retries trying to find a free name");
 }
 
 // Walk the fallback chain only if the user has not pinned a model AND the

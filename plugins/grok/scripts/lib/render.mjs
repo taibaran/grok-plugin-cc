@@ -47,6 +47,26 @@ export class TerminalSanitizer {
     if (completedCsi || completedOsc || completedDcs || completedSimple) {
       return sanitize(text);
     }
+    // Cap the pending buffer. v0.5.0 review (Gemini) flagged that an
+    // attacker streaming an unterminated ANSI sequence (e.g. `ESC [`
+    // followed by infinite chars without a final letter) would grow
+    // `this.pending` without bound and OOM the Node process. Drop the
+    // accumulated tail once it exceeds MAX_PENDING_ESCAPE_BYTES — there
+    // is no legitimate ANSI sequence longer than a few dozen bytes, so
+    // anything past this cap is either a parser-state attack or a
+    // malformed stream. We dropped the tail entirely rather than
+    // attempt to sanitize it because partial-sequence bytes between an
+    // ESC and an unknown terminator are still potentially dangerous to
+    // a downstream terminal.
+    if (tail.length > MAX_PENDING_ESCAPE_BYTES) {
+      // Force-sanitize the entire text — the over-long tail will be
+      // stripped by the sanitize() ANSI regex even if incomplete,
+      // because the regex matches CSI/OSC/DCS prefixes up to their
+      // terminators (which the partial tail does not have) and the
+      // C0-control fallback catches the ESC byte itself.
+      this.pending = "";
+      return sanitize(text);
+    }
     this.pending = tail;
     return sanitize(text.slice(0, lastEsc));
   }
@@ -56,6 +76,13 @@ export class TerminalSanitizer {
     return "";
   }
 }
+
+// Hard cap on the pending-escape buffer in TerminalSanitizer. Anything
+// beyond this length without a terminator is either a parser-state
+// attack or a malformed stream — force-drop and resync. 4 KiB is far
+// more than any legitimate ANSI / OSC / DCS sequence (real-world max is
+// ~80 bytes for OSC titlebar updates).
+export const MAX_PENDING_ESCAPE_BYTES = 4 * 1024;
 
 export function sanitizeForTerminal(s) { return sanitize(typeof s === "string" ? s : String(s)); }
 

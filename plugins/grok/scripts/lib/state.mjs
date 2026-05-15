@@ -136,6 +136,12 @@ export function pruneJobs(cwd) {
   }
 }
 
+// Hard cap on `readBoundedJobLog` reads. Aligned with companion.mjs's
+// MAX_REVIEW_JSON_BYTES. The on-disk file itself is uncapped (raw bytes
+// kept for postmortem) but bringing > 8 MiB into memory for display
+// would OOM the dispatcher.
+export const MAX_JOB_LOG_READ_BYTES = 8 * 1024 * 1024;
+
 // Confine a job-log path to the jobs directory. Job metadata is JSON we wrote
 // ourselves, but the file can be tampered with on disk by anything with write
 // access to ${CLAUDE_PLUGIN_DATA}. Without confinement, a manipulated stdout_path
@@ -181,6 +187,55 @@ export function safeJobLogPath(p, cwd) {
   if (exists && path.dirname(resolvedReal) !== dirReal) return null;
 
   return exists ? resolvedReal : resolvedPlain;
+}
+
+// TOCTOU-safe bounded read of a job log file. The previous flow —
+// `safeJobLogPath` returns a string, caller `fs.openSync(path)` — has a
+// race window in shared-machine environments: an attacker can swap a
+// valid log for a symlink to `/etc/shadow` between the validation and
+// the open call, leaking arbitrary user-readable files via /grok:result.
+//
+// Defenses layered here (all on a SINGLE fd, no path-string races):
+//   1. safeJobLogPath confines the path string to jobsDir.
+//   2. `O_NOFOLLOW` on the open() call: open fails with ELOOP if the
+//      leaf is a symlink at open time. An attacker who plants a symlink
+//      AFTER safeJobLogPath returns cannot win this race — they would
+//      have to win the kernel-internal open syscall.
+//   3. `fstatSync(fd)` verifies the opened inode is a regular file
+//      (not a directory, device, fifo, etc.).
+//   4. Read at most `maxBytes` from offset 0 of that exact fd.
+//
+// Returns the file content (with a truncation marker if it exceeds
+// maxBytes), or null if any safety check failed. Gemini round-7
+// finding (v0.5.0).
+export function readBoundedJobLog(filePath, cwd, maxBytes = MAX_JOB_LOG_READ_BYTES) {
+  const safe = safeJobLogPath(filePath, cwd);
+  if (!safe) return null;
+
+  let fd;
+  try {
+    fd = fs.openSync(safe, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch {
+    return null;
+  }
+
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return null;
+    if (st.size === 0) return "";
+    const cap = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(cap);
+    fs.readSync(fd, buf, 0, cap, 0);
+    const text = buf.toString("utf8");
+    if (st.size > maxBytes) {
+      return text + `\n\n[... output truncated by grok-plugin: ${st.size - maxBytes} bytes omitted; full output remains at ${safe}]\n`;
+    }
+    return text;
+  } catch {
+    return null;
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
 }
 
 // Purge non-running jobs older than maxAgeMs (default: all). Returns count.

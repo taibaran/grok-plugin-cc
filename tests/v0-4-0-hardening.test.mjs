@@ -99,15 +99,17 @@ test("B3: grokBaseArgs uses the shared READ_ONLY_DISALLOWED_TOOLS constant", () 
 // B4 — parseGrokJson uses shared findLastJsonObject (matches stop-gate)
 // ============================================================================
 
-test("B4: companion.mjs::parseGrokJson uses findLastJsonObject in slow path", () => {
-  const src = fs.readFileSync(COMPANION_PATH, "utf8");
-  const start = src.indexOf("function parseGrokJson(");
+test("B4: lib/grok.mjs::parseGrokJson uses findLastJsonObject in slow path", () => {
+  // v0.5.0 moved parseGrokJson from companion.mjs to lib/grok.mjs.
+  const GROK_LIB_PATH = new URL("../plugins/grok/scripts/lib/grok.mjs", import.meta.url).pathname;
+  const src = fs.readFileSync(GROK_LIB_PATH, "utf8");
+  const start = src.indexOf("export function parseGrokJson(");
   assert.ok(start >= 0);
   const slice = src.slice(start, start + 2500);
   assert.match(slice, /findLastJsonObject/,
     "parseGrokJson must use findLastJsonObject in its slow path");
   // Import is at the top.
-  assert.match(src, /import\s*\{[^}]*findLastJsonObject[^}]*\}\s*from\s*"\.\/lib\/verdict\.mjs"/);
+  assert.match(src, /import\s*\{[^}]*findLastJsonObject[^}]*\}\s*from\s*"\.\/verdict\.mjs"/);
 });
 
 test("B4: findLastJsonObject returns the LAST balanced object", () => {
@@ -160,26 +162,35 @@ test("B4: findLastJsonObject still finds a real envelope hidden after partial no
 // B5 — /grok:result bounded reads (Codex finding)
 // ============================================================================
 
-test("B5: companion.mjs::cmdResult uses readBoundedFile with a cap", () => {
+test("B5: companion.mjs::cmdResult uses TOCTOU-safe readBoundedJobLog with a cap", () => {
+  // v0.5.0 upgraded the bounded read from `readBoundedFile(safePath, cap)` —
+  // which had a TOCTOU race between safeJobLogPath and the subsequent
+  // fs.openSync — to `readBoundedJobLog(filePath, cwd, cap)` which
+  // validates + opens with O_NOFOLLOW + fstats inside one fd. This test
+  // asserts cmdResult is on the new API.
   const src = fs.readFileSync(COMPANION_PATH, "utf8");
-  assert.match(src, /function readBoundedFile\(/);
-  // cmdResult must call readBoundedFile, not fs.readFileSync directly.
   const start = src.indexOf("function cmdResult(");
   assert.ok(start >= 0);
   const slice = src.slice(start, start + 2500);
-  assert.match(slice, /readBoundedFile\(safeOut,\s*MAX_REVIEW_JSON_BYTES\)/,
-    "cmdResult must bound stdout reads at MAX_REVIEW_JSON_BYTES");
-  assert.match(slice, /readBoundedFile\(safeErr,\s*MAX_REVIEW_JSON_BYTES\)/,
-    "cmdResult must bound stderr reads at MAX_REVIEW_JSON_BYTES");
+  assert.match(slice, /readBoundedJobLog\(meta\.stdout_path,\s*undefined,\s*MAX_REVIEW_JSON_BYTES\)/,
+    "cmdResult must use readBoundedJobLog (TOCTOU-safe) for stdout, bounded at MAX_REVIEW_JSON_BYTES");
+  assert.match(slice, /readBoundedJobLog\(meta\.stderr_path,\s*undefined,\s*MAX_REVIEW_JSON_BYTES\)/,
+    "cmdResult must use readBoundedJobLog (TOCTOU-safe) for stderr, bounded at MAX_REVIEW_JSON_BYTES");
 });
 
-test("B5: readBoundedFile-like flow truncates with a marker on oversized files", () => {
-  // We can't import readBoundedFile (it's private to companion.mjs), but we
-  // can assert the truncation marker is part of the implementation so
-  // future refactors keep it.
-  const src = fs.readFileSync(COMPANION_PATH, "utf8");
+test("B5 (v0.5.0): readBoundedJobLog truncates with a marker on oversized files", () => {
+  // v0.5.0 moved the bounded-read helper to lib/state.mjs as
+  // `readBoundedJobLog` and made it TOCTOU-safe (O_NOFOLLOW + fstat).
+  const STATE_LIB = new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url).pathname;
+  const src = fs.readFileSync(STATE_LIB, "utf8");
   assert.match(src, /\[\.\.\. output truncated by grok-plugin/,
-    "readBoundedFile must include a truncation marker in the returned text");
+    "readBoundedJobLog must include a truncation marker in the returned text");
+  // It must also use O_NOFOLLOW (TOCTOU defense).
+  assert.match(src, /O_NOFOLLOW/,
+    "readBoundedJobLog must open with O_NOFOLLOW to defeat symlink-swap races");
+  // And fstat on the fd (not stat on the path).
+  assert.match(src, /fs\.fstatSync\(fd\)/,
+    "readBoundedJobLog must fstat the opened fd, not stat the path");
 });
 
 // ============================================================================

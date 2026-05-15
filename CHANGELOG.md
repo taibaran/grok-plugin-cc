@@ -5,6 +5,70 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-15
+
+Comprehensive 4-reviewer round (Claude / Codex / Gemini / Grok) surfaced
+a fresh set of attack surfaces and code-quality opportunities. Five real
+bugs + four refactor items addressed.
+
+### Real bugs
+
+- **C1. `findLastVerdictInString` O(n²) scan** (`lib/verdict.mjs`).
+  Same pathological-input vulnerability Codex flagged for
+  `findLastJsonObject` in round 4 — a wall of `{` chars with no `}`
+  triggered N independent scans-to-EOF. The verdict scanner now uses
+  the same `MAX_FAILED_SCANS_PER_CALL = 128` cap. (Codex.)
+
+- **C2. Disk exhaustion via unbounded job logs** (`companion.mjs::runJob`).
+  An adversarial prompt trapping Grok in an output loop could silently
+  fill the host filesystem before the timeout fired. Added
+  `MAX_JOB_LOG_BYTES = 500 MiB` cap: on overflow the process tree is
+  terminated and the job is marked `disk-overflow`. (Gemini.)
+
+- **C3. TOCTOU race in `/grok:result`** (`lib/state.mjs`,
+  `companion.mjs`). The previous flow `safeJobLogPath` → `fs.openSync`
+  had a race window in shared-machine environments where an attacker
+  could swap a valid log for a symlink between the validation and the
+  open. New `readBoundedJobLog` opens with `O_NOFOLLOW` (rejects
+  symlink leaves), `fstat`s the opened fd (rejects non-regular files),
+  and reads bounded — all through a single fd, no path-string races.
+  (Gemini.)
+
+- **C4. TerminalSanitizer pending-buffer DoS** (`lib/render.mjs`).
+  An attacker streaming an unterminated ANSI sequence (`ESC [`
+  followed by infinite chars without a terminator) would grow
+  `this.pending` without bound and OOM the Node process. Cap at
+  `MAX_PENDING_ESCAPE_BYTES = 4 KiB`: anything past this length is
+  force-sanitized and dropped. (Gemini.)
+
+- **C5. Default task timeout was `0` (unbounded)** (`companion.mjs`).
+  Bumped to 2 hours — a hard backstop for runaway rescue agents
+  while preserving the open-ended-by-design property for legitimate
+  long rescues. Users can still pass `--timeout 0` to opt back into
+  unbounded behavior. (Gemini.)
+
+### Refactor
+
+- **C6 + C9. Shared envelope parser and prompt-file helper.**
+  `parseGrokJson` and `writePromptToTempFile` were each duplicated
+  verbatim in `companion.mjs` AND `stop-review-gate-hook.mjs`.
+  Both moved to `lib/grok.mjs` as exports. The duplication risk
+  Codex flagged in round 3 (parsers could drift over time) is closed:
+  one source of truth, used by both call sites. (Codex + Claude.)
+
+- **C7 (partial). Behavior tests for newly-exported helpers.**
+  Added 15 tests in `tests/v0-5-0-hardening.test.mjs` that exercise
+  `parseGrokJson`, `writePromptToTempFile`, `readBoundedJobLog`, and
+  `parseVerdict` directly — these used to be private and only
+  source-shape-tested. Full conversion of all source-regex tests is
+  v0.5.1 work. (Claude.)
+
+- **C8 (deferred). Mock-grok integration tests.** Tracked for v0.5.1.
+
+### Tests
+
+- 161 tests (was 146 in v0.4.0). All passing.
+
 ## [0.4.0] - 2026-05-15
 
 Round 3 of independent review. Codex, Gemini, and Grok all approved v0.3.0

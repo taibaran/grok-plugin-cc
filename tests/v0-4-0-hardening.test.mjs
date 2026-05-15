@@ -130,6 +130,32 @@ test("B4: findLastJsonObject returns null on empty/null/non-string", () => {
   assert.equal(findLastJsonObject(12345), null);
 });
 
+test("B4: findLastJsonObject handles pathological N-`{` input in O(n) (Codex round-4 fix)", () => {
+  // Synthesize an 8 KiB string of `{` with no `}`. Pre-fix this was
+  // O(n²) — each `{` scanned to EOF independently — and would hang for
+  // 8 MiB inputs. With the failure cap (128 per call) it must complete
+  // quickly even when the wall is enormous. We use 8 KiB here so the
+  // test stays fast even on slow CI runners; the algorithmic bound
+  // applies regardless of size.
+  const pathological = "{".repeat(8 * 1024);
+  const t0 = Date.now();
+  const result = findLastJsonObject(pathological);
+  const dt = Date.now() - t0;
+  assert.equal(result, null, "no balanced object exists in a wall of `{` chars");
+  assert.ok(dt < 1000, `must complete in < 1s, took ${dt}ms`);
+});
+
+test("B4: findLastJsonObject still finds a real envelope hidden after partial noise", () => {
+  // The failure-cap fix must NOT break the case where a legitimate
+  // envelope follows some partial JSON noise. A few dozen unbalanced
+  // fragments are well below the 128-failure cap.
+  const noise = Array.from({ length: 16 }, (_, i) => `{partial${i}`).join(" ");
+  const input = `${noise} prefix {"text":"real","stopReason":"EndTurn"}`;
+  const result = findLastJsonObject(input);
+  assert.ok(result, "must still find the real envelope after legitimate noise");
+  assert.equal(result.text, "real");
+});
+
 // ============================================================================
 // B5 — /grok:result bounded reads (Codex finding)
 // ============================================================================
@@ -172,14 +198,23 @@ test("B6: companion.mjs validates media path before generating an `open` hint", 
   assert.match(slice, /isSafeMediaPath\(mediaPath\)/);
 });
 
-test("B6: isSafeMediaPath-style regex rejects shell metacharacters", () => {
-  // We reproduce the pattern here to test it end-to-end. If the source
-  // pattern ever changes, this test will detect drift via the next test.
-  const SAFE = /^[A-Za-z0-9._\/\-%@+]+$/;
-  // Legitimate Grok output:
+test("B6: isSafeMediaPath regex requires absolute path AND rejects shell metacharacters", () => {
+  // Round 4 of review (Gemini) caught a leading-hyphen arg-injection:
+  // macOS `open -aTerminal` parses the path as a FLAG (launching
+  // Terminal.app), so a returned "path" of `-aTerminal` would have been
+  // treated as safe by the previous regex `^[A-Za-z0-9._/\-%@+]+$`.
+  // The fix: require the path to start with `/` (absolute), refusing
+  // any leading hyphen or alphanumeric-only relative path.
+  const SAFE = /^\/[A-Za-z0-9._\/\-%@+]*$/;
+  // Legitimate absolute Grok output:
   assert.ok(SAFE.test("/Users/me/.grok/sessions/abc%2Fdef/images/1.jpg"));
   assert.ok(SAFE.test("/tmp/grok-out/video.mp4"));
-  // Hostile payloads must be rejected:
+  // The leading-hyphen attack — must be rejected.
+  assert.equal(SAFE.test("-aTerminal"), false,
+    "leading hyphen must be rejected (open -aTerminal is an arg-injection vector)");
+  assert.equal(SAFE.test("-rf"), false,
+    "any leading hyphen must be rejected (-rf, -aFinder, etc)");
+  // Other shell-metacharacter attacks — same rejection as before.
   for (const bad of [
     '"; rm -rf ~; #',
     "'\"';rm",
@@ -188,18 +223,29 @@ test("B6: isSafeMediaPath-style regex rejects shell metacharacters", () => {
     "/tmp/a$(id)",
     "/tmp/a`id`",
     "/tmp/a\nrm /etc",
-    "/tmp/a&background"
+    "/tmp/a&background",
+    "relative/path.jpg",            // no leading slash → reject
+    "Users/me/.grok/img.jpg",       // no leading slash → reject
+    "../etc/passwd"                 // no leading slash → reject
   ]) {
     assert.equal(SAFE.test(bad), false, `should reject: ${bad}`);
   }
 });
 
-test("B6: companion.mjs::SAFE_MEDIA_PATH_PATTERN matches the regex used in the source", () => {
+test("B6: companion.mjs::SAFE_MEDIA_PATH_PATTERN matches the absolute-path regex in source", () => {
   const src = fs.readFileSync(COMPANION_PATH, "utf8");
-  // The exact pattern in companion.mjs must be the conservative
-  // alphanumeric+path-chars regex. If a future refactor relaxes it, this
-  // test breaks.
-  assert.match(src, /SAFE_MEDIA_PATH_PATTERN = \/\^\[A-Za-z0-9\._\\\/\\\-%@\+\]\+\$\//);
+  // The exact pattern must require a leading slash and only the safe
+  // character class for the rest. Round-4 fix.
+  assert.match(src, /SAFE_MEDIA_PATH_PATTERN = \/\^\\\/\[A-Za-z0-9\._\\\/\\\-%@\+\]\*\$\//);
+});
+
+test("B6: imagine output uses `open --` POSIX end-of-options separator", () => {
+  // Defense-in-depth alongside the regex: even if the regex ever
+  // loosens and lets a leading hyphen through, `open --` ensures macOS
+  // `open` parses the next arg as a file path, not a flag.
+  const src = fs.readFileSync(COMPANION_PATH, "utf8");
+  assert.match(src, /open\s+--\s+"\$\{mediaPath\}"/,
+    "imagine output must use `open -- \"...\"` (POSIX end-of-options)");
 });
 
 // ============================================================================

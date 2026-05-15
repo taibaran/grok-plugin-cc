@@ -77,22 +77,37 @@ export function parseVerdict(raw) {
 // Used by:
 //   - companion.mjs::parseGrokJson — Grok's `--output-format json`
 //     envelope ({text, sessionId, ...} or {type: "error", message}).
-//     The envelope is by contract the FINAL object Grok emits; any
-//     preceding noise (tracing, partial JSON from a tail-read) is
-//     discarded.
-//   - stop-review-gate-hook.mjs::parseGrokJsonEnvelope — same shape,
-//     same contract, but reading the stdout TAIL where the envelope is
-//     guaranteed to be the last balanced object.
+//   - stop-review-gate-hook.mjs::parseGrokJsonEnvelope — same shape.
 //
 // The shared helper means a future refactor to one site can't silently
 // drift from the other.
+//
+// **Worst-case bound** (Codex round-4 finding): the naive "try every `{`
+// independently" walk is O(n²) on pathological input. N consecutive `{`
+// with no `}` would cause N independent scans of length N → 1, summing
+// to N²/2 operations. For 8 MiB of `{` that is ~32 trillion ops, enough
+// to hang the hook. Defense: cap the number of FAILED scans per call.
+// Legitimate inputs have at most a handful of partial / unbalanced
+// fragments before the real envelope; 128 failures is generous for
+// production while keeping the worst case at 128 × n = O(n).
+const MAX_FAILED_SCANS_PER_CALL = 128;
+
 export function findLastJsonObject(s) {
   if (typeof s !== "string" || !s) return null;
   let last = null;
+  let failures = 0;
   for (let i = 0; i < s.length; i++) {
     if (s[i] !== "{") continue;
     const end = findBalancedJsonEnd(s, i);
-    if (end < 0) continue;
+    if (end < 0) {
+      failures++;
+      if (failures > MAX_FAILED_SCANS_PER_CALL) {
+        // Pathological input — stop scanning. Whatever earlier object
+        // we found (if any) is returned. Bounds total work at O(n).
+        break;
+      }
+      continue;
+    }
     try {
       const parsed = JSON.parse(s.slice(i, end + 1));
       if (parsed && typeof parsed === "object") last = parsed;

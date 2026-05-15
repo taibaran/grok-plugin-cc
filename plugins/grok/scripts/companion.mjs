@@ -153,18 +153,29 @@ function readBoundedFile(filePath, maxBytes) {
 }
 
 // Validate that a path Grok claimed to write (an image / video output)
-// is safe to print to the user's terminal as part of an `open "<path>"`
-// hint. Without this check, a malicious model that returned a markdown
-// link like `![alt]("; rm -rf ~; #)` would cause the plugin to display
-// `open ""; rm -rf ~; #"` to the user — a copy-paste command-injection
-// trap.
+// is safe to print to the user's terminal as part of an `open <path>`
+// hint. Two attack surfaces in scope:
 //
-// Defense: refuse any path that contains shell metacharacters or
-// whitespace. The legitimate output of `/imagine` is an absolute path
-// under `~/.grok/sessions/.../images/<n>.<ext>` — those paths contain
-// only `/`, alphanumerics, dashes, dots, and underscores. Anything else
-// is rejected.
-const SAFE_MEDIA_PATH_PATTERN = /^[A-Za-z0-9._\/\-%@+]+$/;
+//   1. Shell-metacharacter injection. A malicious model returning a
+//      markdown link like `![alt]("; rm -rf ~; #)` would otherwise have
+//      the plugin display `open ""; rm -rf ~; #"` — a copy-paste
+//      command-injection trap.
+//
+//   2. Argument injection via leading hyphen. macOS `open -aTerminal`
+//      parses the path as a FLAG (launching Terminal.app instead of
+//      opening the file). A model returning `-aTerminal` as a "path"
+//      would otherwise produce `open "-aTerminal"` — visually a file
+//      path but actually an arg. (Gemini round-4 finding.)
+//
+// Defense: legitimate /imagine output is always an absolute path under
+// `~/.grok/sessions/<workspace>/<session>/images/<n>.<ext>`. Require:
+//   - First character: `/` (absolute path; refuses leading `-` or any
+//     other non-slash character).
+//   - Body: alphanumeric, `.`, `_`, `/`, `-`, `%`, `@`, `+` only.
+//   - Length 1..4096.
+// The /imagine output handler ALSO writes the hint as `open -- "<path>"`
+// (POSIX end-of-options marker) for defense in depth.
+const SAFE_MEDIA_PATH_PATTERN = /^\/[A-Za-z0-9._\/\-%@+]*$/;
 function isSafeMediaPath(p) {
   return typeof p === "string" && p.length > 0 && p.length < 4096 && SAFE_MEDIA_PATH_PATTERN.test(p);
 }
@@ -864,7 +875,11 @@ async function cmdImagine({ flags, positional }, { video }) {
     // suggesting. If the path looks unsafe, just print it (the user can
     // still inspect or open it manually).
     if (isSafeMediaPath(mediaPath)) {
-      process.stdout.write(`\nOpen with:\n  open "${mediaPath}"\n`);
+      // `open --` uses the POSIX end-of-options marker so even a path
+      // that somehow slipped a leading hyphen past the regex (future
+      // refactor regression) cannot be reinterpreted by macOS `open` as
+      // a `-aTerminal` flag. Belt-and-suspenders alongside the regex.
+      process.stdout.write(`\nOpen with:\n  open -- "${mediaPath}"\n`);
     } else {
       process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
     }

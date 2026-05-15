@@ -866,21 +866,27 @@ async function cmdImagine({ flags, positional }, { video }) {
   const mediaPath = extractMediaPath(parsed.text);
   if (mediaPath) {
     const noun = video ? "Video" : "Image";
-    process.stdout.write(`${noun}: ${mediaPath}\n`);
-    // The `open "<path>"` hint is a copy-paste-into-shell convenience.
-    // If Grok returned a path with shell metacharacters (a content-policy
-    // bypass, a tampered upstream, or an attacker-influenced description)
-    // a naive `open "${mediaPath}"` template would let the user
-    // copy-paste a command-injection payload. Validate before
-    // suggesting. If the path looks unsafe, just print it (the user can
-    // still inspect or open it manually).
+    // VALIDATE BEFORE PRINTING. Codex round-5 caught that the previous
+    // version printed `${noun}: ${mediaPath}\n` BEFORE the safety check,
+    // so a path containing newlines, ANSI escapes, or other terminal
+    // control sequences could leak straight to the user's terminal —
+    // potentially clearing the screen, moving the cursor, or hiding
+    // text. The safety check now gates BOTH the path display and the
+    // open hint. Unsafe paths get a JSON-escaped representation so the
+    // user can still see what was returned without the terminal being
+    // attacked.
     if (isSafeMediaPath(mediaPath)) {
+      process.stdout.write(`${noun}: ${mediaPath}\n`);
       // `open --` uses the POSIX end-of-options marker so even a path
       // that somehow slipped a leading hyphen past the regex (future
       // refactor regression) cannot be reinterpreted by macOS `open` as
       // a `-aTerminal` flag. Belt-and-suspenders alongside the regex.
       process.stdout.write(`\nOpen with:\n  open -- "${mediaPath}"\n`);
     } else {
+      // JSON.stringify escapes control characters, quotes, and backslashes,
+      // so even a path full of ANSI/newline payloads renders as inert text.
+      const safeDisplay = JSON.stringify(mediaPath);
+      process.stdout.write(`${noun} (UNSAFE PATH): ${safeDisplay}\n`);
       process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
     }
     if (parsed.sessionId) {

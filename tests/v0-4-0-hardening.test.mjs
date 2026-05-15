@@ -248,6 +248,43 @@ test("B6: imagine output uses `open --` POSIX end-of-options separator", () => {
     "imagine output must use `open -- \"...\"` (POSIX end-of-options)");
 });
 
+test("B6 round-5: mediaPath display is gated by isSafeMediaPath (Codex round-5 fix)", () => {
+  // Codex round-5 caught that the previous version printed
+  // `${noun}: ${mediaPath}\n` BEFORE the isSafeMediaPath check, so a
+  // path containing ANSI escapes or newlines leaked straight to the
+  // user's terminal. The fix moves the validation BEFORE any output.
+  const src = fs.readFileSync(COMPANION_PATH, "utf8");
+  const cmdImagineStart = src.indexOf("async function cmdImagine(");
+  assert.ok(cmdImagineStart >= 0, "cmdImagine must exist");
+  // Find the mediaPath display block.
+  const mediaPathBlockStart = src.indexOf("const mediaPath = extractMediaPath(", cmdImagineStart);
+  assert.ok(mediaPathBlockStart >= 0);
+  const block = src.slice(mediaPathBlockStart, mediaPathBlockStart + 3000);
+
+  // The first .write that mentions `${mediaPath}` (or its JSON-escaped
+  // form) must come AFTER `isSafeMediaPath(`. Verify by finding the
+  // positions.
+  const safeCheckPos = block.indexOf("isSafeMediaPath(mediaPath)");
+  // Find any `process.stdout.write(...)` that interpolates mediaPath.
+  const rawWritePos = block.search(/process\.stdout\.write\(`[^`]*\$\{mediaPath\}/);
+  assert.ok(safeCheckPos >= 0, "isSafeMediaPath(mediaPath) check must exist");
+  if (rawWritePos >= 0) {
+    assert.ok(rawWritePos > safeCheckPos,
+      "Any process.stdout.write that interpolates mediaPath must come AFTER the isSafeMediaPath check (Codex round-5)");
+  }
+});
+
+test("B6 round-5: unsafe mediaPath is shown JSON-escaped to defang ANSI/newlines", () => {
+  // The unsafe-path branch must JSON.stringify the path so terminal
+  // control characters render as inert text (e.g. \"\\u001b[2J\").
+  // We assert against the whole file since cmdImagine is over 100 lines.
+  const src = fs.readFileSync(COMPANION_PATH, "utf8");
+  assert.match(src, /JSON\.stringify\(mediaPath\)/,
+    "Unsafe mediaPath must be JSON.stringify-ed before display");
+  assert.match(src, /UNSAFE PATH/,
+    "Unsafe-path display must label the line as unsafe");
+});
+
 // ============================================================================
 // B7 — review schema/prose alignment + strict validation (Grok finding)
 // ============================================================================

@@ -417,6 +417,61 @@ test("v0.9.1: POSIX `--` terminator collects everything after as positional", ()
   assert.deepEqual(r.positional, ["--worktree", "task"]);
 });
 
+test("v0.9.3 (Grok LOW #2 round-3): parseArgs returns literalStartIndex directly", () => {
+  // Direct assertion on the return value, not just the side effect on
+  // `positional`. A future refactor that breaks the index calculation
+  // while preserving `positional` contents would only be caught here.
+  const r1 = parseArgs(["a", "b", "--", "c", "d"], {});
+  assert.equal(r1.literalStartIndex, 2, "literalStartIndex must point to the first post-terminator token (index 2: 'c')");
+  assert.deepEqual(r1.positional, ["a", "b", "c", "d"]);
+  // Slicing reproduces the regular vs literal split.
+  assert.deepEqual(r1.positional.slice(0, r1.literalStartIndex), ["a", "b"]);
+  assert.deepEqual(r1.positional.slice(r1.literalStartIndex), ["c", "d"]);
+
+  // No terminator → literalStartIndex === -1
+  const r2 = parseArgs(["a", "b"], {});
+  assert.equal(r2.literalStartIndex, -1);
+
+  // `--` immediately first → literalStartIndex === 0
+  const r3 = parseArgs(["--", "a", "b"], {});
+  assert.equal(r3.literalStartIndex, 0);
+  assert.deepEqual(r3.positional, ["a", "b"]);
+});
+
+test("v0.9.3 (Grok LOW #1 round-3): control-byte refusal error uses JSON.stringify to defuse the bytes", t => {
+  const d = makeFakeGrokDir(t);
+  setFakeMode(d, "ok-plain");
+  // A BEL byte is the canonical case — emitting it raw rings the terminal.
+  const r = runComp(d, ["worktree", "list\x07bell"]);
+  assert.notEqual(r.status, 0);
+  // The error message must show the bytes as a visible  escape,
+  // not emit them raw. JSON.stringify('\x07') = '"\\u0007"'.
+  assert.match(r.stderr, /\\u0007/,
+    "error message must render control bytes as visible \\u00XX escapes (Grok LOW #1)");
+  // And it must NOT contain the raw BEL.
+  assert.equal(r.stderr.includes("\x07"), false,
+    "stderr must not contain the raw control byte");
+});
+
+test("v0.9.3 (Gemini Nit #1 round-3): allowFlagLikePositionals removed from wrapper signature", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // The parameter should be gone from the function signature.
+  const sigLine = src.slice(src.indexOf("function cmdGrokSubcommandPassthrough"));
+  const closeParen = sigLine.indexOf(")");
+  assert.equal(sigLine.slice(0, closeParen).includes("allowFlagLikePositionals"), false,
+    "dead `allowFlagLikePositionals` parameter must be removed");
+});
+
+test("v0.9.3 (Gemini Nit #2 round-3): allowed flag values use the same control-byte denylist as positionals", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // The flag-value validation should use CONTROL_BYTE_FREETEXT_DENYLIST,
+  // not the inline strict regex from v0.9.2.
+  const block = src.slice(src.indexOf("for (const [k, v] of Object.entries(flags))"), src.indexOf("const argv = [subcommand"));
+  assert.match(block, /CONTROL_BYTE_FREETEXT_DENYLIST\.test\(sv\)/);
+  assert.equal(block.includes('/[\\x00-\\x1f\\x7f]/.test(sv)'), false,
+    "old inline strict regex must be replaced with the named constant");
+});
+
 test("v0.9.1: /grok:worktree still refuses flag-like positionals (no opt-in for this subcmd)", t => {
   const d = makeFakeGrokDir(t);
   setFakeMode(d, "ok-plain");

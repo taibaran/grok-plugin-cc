@@ -997,7 +997,7 @@ async function cmdImagine({ flags, positional }, { video }) {
       process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
     }
     if (parsed.sessionId) {
-      process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: grok -r ${parsed.sessionId})\n`);
+      process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: /grok:rescue --resume=${parsed.sessionId}  or  grok -r ${parsed.sessionId})\n`);
     }
   } else {
     // No markdown link in the response — surface the raw text so the user
@@ -1104,7 +1104,7 @@ async function cmdTask({ flags, positional }) {
   // a sessionId. Showing a half-truth footer ("Session: <id>") that the
   // user can't actually `grok -r <id>` is worse than no footer at all.
   if (meta.requested_session_id) {
-    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: grok -r ${meta.requested_session_id})\n`);
+    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: /grok:rescue --resume=${meta.requested_session_id}  or  grok -r ${meta.requested_session_id})\n`);
   }
   process.stdout.write(`[grok-plugin] /grok:result ${meta.id}\n`);
   if (result.timedOut) process.exit(EXIT_TIMEOUT);
@@ -1163,7 +1163,7 @@ function cmdResult({ positional }) {
   console.log(`Task: ${meta.task_text || "-"}`);
   console.log(`Started: ${fmtTime(meta.started_at)}${meta.ended_at ? `   Ended: ${fmtTime(meta.ended_at)}` : ""}`);
   if (meta.exit_code !== undefined) console.log(`Exit: ${meta.exit_code}`);
-  if (meta.session_id) console.log(`Session: ${meta.session_id}  (resume: grok -r ${meta.session_id})`);
+  if (meta.session_id) console.log(`Session: ${meta.session_id}  (resume: /grok:rescue --resume=${meta.session_id}  or  grok -r ${meta.session_id})`);
   console.log("\n## Output\n");
   // v0.5.0: switched from `safeJobLogPath` + `readBoundedFile` to
   // `readBoundedJobLog` which atomically validates + opens + reads
@@ -2095,7 +2095,7 @@ const DEFAULT_SUB_TIMEOUT_MS = 30 * 1000;
 // add "multi\nline\nfact"`, pasted multi-line search queries) need
 // these. Still reject every other C0 (NUL, BEL, ESC, etc.) and DEL.
 const CONTROL_BYTE_FREETEXT_DENYLIST = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
-function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, literalStartIndex = -1, label, allowFlags = new Set(), allowFlagLikePositionals = false, defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
+function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, literalStartIndex = -1, label, allowFlags = new Set(), defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
   if (!which("grok")) {
     console.error("Grok CLI not installed. Run `/grok:setup`.");
     process.exit(127);
@@ -2121,12 +2121,18 @@ function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, literalSt
       process.exit(2);
     }
     if (CONTROL_BYTE_FREETEXT_DENYLIST.test(s)) {
-      console.error(`Refusing to forward argument with disallowed control bytes: ${s.slice(0, 64)}`);
+      // v0.9.3 (Grok LOW #1 round-3): the offending bytes were
+      // previously emitted raw into stderr — a BEL would ring the
+      // terminal, an ESC would inject ANSI. JSON.stringify renders
+      // them as visible `\u00XX` escapes.
+      console.error(`Refusing to forward argument with disallowed control bytes: ${JSON.stringify(s.slice(0, 64))}`);
       process.exit(2);
     }
-    if (!isLiteral && !allowFlagLikePositionals) {
+    if (!isLiteral) {
       if (s.startsWith("--") || (s.length >= 2 && s[0] === "-" && /^-[A-Za-z]/.test(s))) {
-        console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)} (use \`-- ${s.slice(0, 32)}\` to pass literally)`);
+        // Same JSON.stringify safety as above; positionals starting with
+        // dashes are usually printable ASCII but defense-in-depth.
+        console.error(`Refusing to forward unknown flag-like argument: ${JSON.stringify(s.slice(0, 64))} (use \`-- ${s.slice(0, 32)}\` to pass literally)`);
         process.exit(2);
       }
     }
@@ -2142,7 +2148,12 @@ function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, literalSt
     if (v === true) safeFlags.push(`--${k}`);
     else if (typeof v === "string" || typeof v === "number") {
       const sv = String(v);
-      if (sv.length > 256 || /[\x00-\x1f\x7f]/.test(sv)) continue;
+      // v0.9.3 (Gemini Nit #2 round-3): use the same control-byte
+      // denylist as positionals (allow TAB/LF/CR) so a future
+      // multi-line flag value isn't silently dropped. Today only
+      // `json` and `timeout` are in SUBCMD_BASE_ALLOW so this is
+      // forward-compatibility only.
+      if (sv.length > 256 || CONTROL_BYTE_FREETEXT_DENYLIST.test(sv)) continue;
       safeFlags.push(`--${k}`, sv);
     }
   }
@@ -2200,6 +2211,12 @@ function cmdWorktree(args) {
   });
 }
 function cmdSessions(args) {
+  // v0.9.3 (Gemini Nit #1 round-3): removed the
+  // `allowFlagLikePositionals: positional[0] === "search"` heuristic.
+  // The POSIX `--` terminator now serves the same purpose more
+  // explicitly — users wanting to search for "--timeout" type
+  // `/grok:sessions search -- --timeout` and the wrapper re-emits
+  // `--` before forwarding. The heuristic was redundant + leaky.
   return cmdGrokSubcommandPassthrough({
     subcommand: "sessions",
     flags: args.flags, positional: args.positional,

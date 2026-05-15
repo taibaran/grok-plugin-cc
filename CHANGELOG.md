@@ -5,6 +5,67 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-05-15
+
+`/goal` round-3 came back **APPROVE_WITH_NITS from 3/3 reviewers** —
+Codex CLEAN, Gemini 3 nits, Grok 2 LOW. This release applies every
+finding plus addresses a long-standing critique about test strategy
+("why fake grok and not real grok?").
+
+### Bug fixes (test strategy)
+
+- **Real-grok integration smoke tests**. The previous 324 fake-grok
+  tests verified that the plugin BUILDS the right argv. They didn't
+  catch upstream renames (if xAI renames `--max-turns` to
+  `--turn-limit`, every fake test still passes but the plugin
+  silently breaks in production). New `tests/integration-real-grok.test.mjs`
+  has 5 smoke tests against the actual `grok` binary:
+    - `grok --version` exit + format
+    - `capabilityProbe` required flags all appear in real `grok --help`
+    - `/grok:setup --json` returns either `ready: true` or actionable
+      `nextSteps`
+    - `/grok:inspect` doesn't silently fail
+    - `/grok:ask` with a sentinel prompt echoes the sentinel
+  Skipped by default (the 320 fake tests stay fast + cost-free + auth-
+  free). Run via `GROK_INTEGRATION_TEST=1 npm test`. CI workflow can
+  set both `GROK_INTEGRATION_TEST=1` and `GROK_CODE_XAI_API_KEY=$SECRET`.
+
+### Round-3 cleanups (all from this round's reviewer feedback)
+
+- **Gemini Nit #1 — `allowFlagLikePositionals` dead code**. Removed
+  the parameter from `cmdGrokSubcommandPassthrough` signature. The
+  POSIX `--` terminator + per-positional `isLiteral` tracking does
+  the same job more explicitly.
+
+- **Gemini Nit #2 — flag-value denylist mismatch**. The positional
+  loop used `CONTROL_BYTE_FREETEXT_DENYLIST` (TAB/LF/CR allowed),
+  but the flag-value loop still used the strict `[\x00-\x1f\x7f]`.
+  Forward-compat fix: same constant in both loops.
+
+- **Gemini Nit #3 — stale short-flag docs**. The plugin's output
+  used to suggest `grok -r <id>` for resume (the raw grok CLI form).
+  After v0.9.2 dropped short aliases from our parser, that's still
+  correct (grok's CLI accepts `-r`) but it doesn't surface the
+  plugin's `/grok:rescue --resume=<id>` option. Output now mentions
+  BOTH: `(resume: /grok:rescue --resume=<id>  or  grok -r <id>)`.
+
+- **Grok LOW #1 — error message emitted blocked bytes raw**.
+  Refusing a positional with `\x07` (BEL) or `\x1b` (ESC) used to
+  emit those bytes into the user's terminal (terminal bell, ANSI
+  injection). The error path now uses `JSON.stringify` to render
+  control bytes as visible `\u00XX` escapes.
+
+- **Grok LOW #2 — direct unit test for `literalStartIndex`**. v0.9.2
+  added the field but only exercised it via the E2E argv-shape test.
+  Added direct assertions on the return value: index points to the
+  correct slot, `-1` when no `--` was seen, `0` when `--` is first.
+
+### Tests
+
+- 4 new round-3 fix tests + 5 integration smoke tests (skipped by
+  default).
+- Total suite: 324 passing + 5 skipped.
+
 ## [0.9.2] - 2026-05-15
 
 `/goal` round-2 on v0.9.1 surfaced more 3/3-convergent bugs in the new

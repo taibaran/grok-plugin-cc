@@ -17,7 +17,7 @@ import {
 import { grokBaseArgs } from "../plugins/grok/scripts/lib/grok.mjs";
 // v0.9.9 (Gemini Nit round-9): moved from dynamic `await import()` to
 // top-level imports for consistency with the rest of this file.
-import { renderJobDetails, formatSessionHint, formatSessionLabel, getSessionProvenance } from "../plugins/grok/scripts/lib/render.mjs";
+import { renderJobDetails, formatSessionHint, formatSessionLabel } from "../plugins/grok/scripts/lib/render.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(__dirname, "../plugins/grok/scripts/companion.mjs");
@@ -248,6 +248,49 @@ test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta
   assert.match(cmdTask, /requested_session_id:\s*flags\["session-id"\]/);
   assert.match(cmdTask, /requested_resume:\s*flags\.resume/);
   assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
+});
+
+test("v0.9.10 (3/3 round-10): trust flag reads from envelope_json, not json_output", () => {
+  // The regression in v0.9.9: meta.json_output reflected the USER-FACING
+  // --json render flag, but cmdReview ALWAYS invokes grok with --output-format
+  // json regardless. So `meta.json_output: false` was emitting the wrong
+  // trust signal, suppressing session hints for plain `/grok:review` runs.
+  // v0.9.10 introduces a separate `envelope_json` field (set at job creation
+  // time) that reflects the actual grok invocation.
+
+  // Scenario 1: user ran /grok:review (no --json), runJob's close handler
+  // populated session_id, envelope_json=true → trust flag set true.
+  // formatSessionHint must return a hint.
+  const meta1 = {
+    kind: "review",
+    json_output: false,             // user didn't pass --json
+    envelope_json: true,            // but grok invocation DID use JSON
+    session_id: "review-session-1",
+    session_id_trustworthy: true    // set by runJob from envelope_json
+  };
+  assert.ok(formatSessionHint(meta1), "normal /grok:review (no --json) must still render the session hint");
+  assert.match(formatSessionHint(meta1), /review-session-1/);
+
+  // Scenario 2: user ran /grok:review --json. Same: trust flag set true,
+  // hint rendered.
+  const meta2 = {
+    kind: "review",
+    json_output: true,
+    envelope_json: true,
+    session_id: "review-session-2",
+    session_id_trustworthy: true
+  };
+  assert.ok(formatSessionHint(meta2));
+
+  // Scenario 3: task job with model-hallucinated JSON. envelope_json
+  // not set → runJob wrote session_id_trustworthy: false. Hint suppressed.
+  const meta3 = {
+    kind: "task",
+    session_id: "from-model-hallucination",
+    session_id_trustworthy: false
+  };
+  assert.equal(formatSessionHint(meta3), null,
+    "task with explicit trust=false must suppress hint regardless of session_id");
 });
 
 test("v0.9.7 (3/3 round-7): formatSessionLabel renders all 5 cases (short form)", async () => {

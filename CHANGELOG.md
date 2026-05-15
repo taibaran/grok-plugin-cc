@@ -5,6 +5,39 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-05-15
+
+`/goal` round-10 — Codex + Grok converged on a **regression v0.9.9
+introduced** while fixing the v0.9.8 architectural issue. The trust
+flag was reading the wrong field.
+
+### Bug fix
+
+- **Codex P2 + Grok HIGH — `meta.json_output` ≠ envelope-was-JSON**.
+  `cmdReview` ALWAYS invokes grok with `jsonOutput: true` regardless
+  of `flags.json` (it parses JSON envelope internally, then re-renders
+  plain text when the user didn't ask for JSON output). v0.9.9's
+  trust gate read `meta.json_output` (which mirrors `flags.json`,
+  the user-facing render flag) → for normal `/grok:review` (no
+  `--json`), the flag was false → trust=false → session hint
+  suppressed. Codex called it out via comparison to v0.9.8 behavior;
+  Grok traced the data flow line-by-line. **Fix**: introduced a
+  separate `meta.envelope_json` field at job-creation time that
+  reflects the actual grok invocation (always true for review). The
+  trust flag now reads from `envelope_json`, not `json_output`.
+  Backward-compat: old jobs without either field still fall back to
+  the v0.9.8 kind whitelist.
+
+- **Gemini Nit round-10 — unused `getSessionProvenance` import in test**.
+  Cleanup; removed.
+
+### Tests
+
+- 1 new behavioral regression test covering all 3 scenarios:
+  `/grok:review` without `--json` (must trust), `/grok:review --json`
+  (must trust), task with model-hallucinated JSON (must suppress).
+- Total: 331 passing + 5 integration (skipped).
+
 ## [0.9.9] - 2026-05-15
 
 `/goal` round-9 — **3/3 explicit approval**. Gemini even returned a

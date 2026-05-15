@@ -597,12 +597,14 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         meta.exit_code = code;
         if (parsedOut.kind === "text" && parsedOut.sessionId) {
           meta.session_id = parsedOut.sessionId;
-          // v0.9.9 (Grok LOW round-9): record whether this sessionId
-          // came from a job that actually requested JSON output. Render
-          // helpers can then trust it conditionally without re-deriving
-          // the decision from `meta.kind`. The trust flag is set HERE,
-          // at the job-creation site, not duplicated in the renderer.
-          meta.session_id_trustworthy = !!meta.json_output;
+          // v0.9.10 (Codex P2 + Grok HIGH round-10): read meta.envelope_json
+          // (set by the command at job-creation time) instead of the
+          // ambiguous meta.json_output. envelope_json reflects whether
+          // the grok invocation itself used --output-format json (i.e.
+          // whether parseGrokJson's sessionId is authoritative).
+          // json_output (kept above for backward compat) reflects the
+          // user-facing --json render flag, which is unrelated.
+          meta.session_id_trustworthy = !!meta.envelope_json;
         }
         meta.ended_at = new Date().toISOString();
         writeJobMeta(meta.id, meta);
@@ -811,7 +813,22 @@ async function cmdReview({ flags, positional }, { adversarial }) {
     kind: adversarial ? "adversarial-review" : "review",
     args,
     task_text: `${target}${focus ? ` - focus: ${focus}` : ""}`,
-    extra: { json_output: jsonOutput, model: flags.model || null, effort: effort || null }
+    extra: {
+      json_output: jsonOutput,
+      // v0.9.10 (Codex P2 + Grok HIGH round-10): the previous v0.9.9 code
+      // used `meta.json_output` (which mirrors the USER-FACING --json
+      // render flag) as the trust signal for parsed session_id. But
+      // cmdReview ALWAYS invokes grok with jsonOutput: true regardless
+      // of flags.json — it parses the JSON envelope internally then
+      // re-renders plain text when --json is not set. So
+      // meta.json_output: false was emitting the wrong trust signal,
+      // suppressing the session hint for normal /grok:review runs.
+      // Add a separate `envelope_json` field that reflects the actual
+      // grok invocation. runJob reads this for the trust decision.
+      envelope_json: true,
+      model: flags.model || null,
+      effort: effort || null
+    }
   });
 
   let result;

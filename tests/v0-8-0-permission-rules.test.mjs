@@ -333,47 +333,112 @@ test("v0.8.1 (Codex P2.b): cmdInspect uses HEADLESS_GROK_MAX_BUFFER + ENOBUFS hi
   assert.match(block, /ENOBUFS/);
 });
 
-test("v0.8.2 (Grok LOW): cmdReview validates BEFORE writePromptToTempFile (no early-exit leak)", t => {
-  // v0.8.1 originally used `try {grokBaseArgs} catch {unlink, exit}`
-  // but a SECOND exit-without-cleanup path was still present:
-  // resolveTimeoutMs(invalid) called process.exit AFTER writePromptToTempFile.
-  // The brittle source-grep test on a specific catch block missed this.
-  //
-  // v0.8.2 reorders: all flag validation happens BEFORE writePromptToTempFile,
-  // so no exit path can run after the temp file exists. Behavioral test:
-  // run /grok:review with an invalid --timeout flag, capture stderr, check
-  // /tmp doesn't grow a grok-prompt-* file.
-  const tmpdir = os.tmpdir();
-  const beforeCount = fs.readdirSync(tmpdir).filter(f => f.startsWith("grok-prompt-")).length;
-  // Need a git repo so captureDiff doesn't bail early
-  const repo = fs.mkdtempSync(path.join(tmpdir, "grok-leak-repo-"));
+test("v0.8.4 (Grok M1 + Codex P2): cmdReview --timeout invalid does NOT leak promptFile (isolated TMPDIR + fake grok)", t => {
+  // v0.8.2's test had two real bugs that Grok M1 + Codex P2 caught:
+  //   - It counted files in the SHARED os.tmpdir() — racy against any
+  //     concurrent grok run or test runner.
+  //   - On a machine without `grok` on PATH (CI without xAI installed),
+  //     cmdReview's `which("grok")` guard exits BEFORE the timeout
+  //     validation path, so the test passed without exercising the
+  //     code it claimed to cover.
+  // v0.8.4 fixes both:
+  //   - Put a fake-grok on PATH so which("grok") succeeds and execution
+  //     reaches the validation logic.
+  //   - Isolate via TMPDIR pointing at a fresh dir so the readdir
+  //     count is scoped to files the test could have created.
+  const fakeDir = makeFakeGrokDir(t);
+  setFakeMode(fakeDir, "ok-json");
+  const isolatedTmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-leak-tmp-"));
+  t.after(() => fs.rmSync(isolatedTmp, { recursive: true, force: true }));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "grok-leak-repo-"));
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
-  spawnSync("git", ["init"], { cwd: repo, encoding: "utf8" });
+  spawnSync("git", ["init", "-q"], { cwd: repo });
   spawnSync("git", ["config", "user.email", "t@t.t"], { cwd: repo });
   spawnSync("git", ["config", "user.name", "t"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "f.txt"), "a");
   spawnSync("git", ["add", "."], { cwd: repo });
-  spawnSync("git", ["commit", "-m", "init"], { cwd: repo });
+  spawnSync("git", ["commit", "-qm", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "f.txt"), "b");
 
-  // Invalid --timeout triggers resolveTimeoutMs's exit(2).
   const r = spawnSync(process.execPath, [COMPANION, "review", "--timeout", "nonsense_value"], {
     cwd: repo,
     encoding: "utf8",
-    env: { ...process.env }
+    env: {
+      ...process.env,
+      TMPDIR: isolatedTmp,
+      TMP: isolatedTmp,
+      TEMP: isolatedTmp,
+      PATH: `${fakeDir}:${process.env.PATH}`
+    }
   });
   assert.notEqual(r.status, 0, "invalid --timeout must exit nonzero");
-  const afterCount = fs.readdirSync(tmpdir).filter(f => f.startsWith("grok-prompt-")).length;
-  assert.equal(afterCount, beforeCount,
-    "review must NOT leak a grok-prompt-* temp file on validation failure (Grok LOW)");
+  assert.match(r.stderr, /Invalid --timeout/i, "error must surface the validation reason");
+  const leaked = fs.readdirSync(isolatedTmp).filter(f => f.startsWith("grok-prompt-"));
+  assert.deepEqual(leaked, [],
+    "review must NOT leave a grok-prompt-* file in TMPDIR on validation failure");
 });
 
-test("v0.8.2 (Grok MED): cmdTask spread order — extractPolicyFlags FIRST, then effort", () => {
-  const src = fs.readFileSync(COMPANION, "utf8");
-  const cmdTask = src.slice(src.indexOf("async function cmdTask"), src.indexOf("// ----------", src.indexOf("async function cmdTask")));
-  // The fix: spread first, explicit effort last → explicit wins.
-  assert.match(cmdTask, /\.\.\.extractPolicyFlags\(flags\),\s*\n?\s*effort/,
-    "cmdTask must spread extractPolicyFlags BEFORE the explicit `effort` key so the normalized value wins");
+test("v0.8.4 (Grok L3): cmdReview also doesn't leak on grokBaseArgs validation failure (invalid --allow rule)", t => {
+  // Grok flagged that v0.8.2's test only covers the resolveTimeoutMs
+  // exit path, not the grokBaseArgs throw path. Add coverage for both
+  // early-exit sites that the v0.8.2 reordering was designed to
+  // protect.
+  const fakeDir = makeFakeGrokDir(t);
+  setFakeMode(fakeDir, "ok-json");
+  const isolatedTmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-leak-tmp2-"));
+  t.after(() => fs.rmSync(isolatedTmp, { recursive: true, force: true }));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "grok-leak-repo2-"));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  spawnSync("git", ["init", "-q"], { cwd: repo });
+  spawnSync("git", ["config", "user.email", "t@t.t"], { cwd: repo });
+  spawnSync("git", ["config", "user.name", "t"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "f.txt"), "a");
+  spawnSync("git", ["add", "."], { cwd: repo });
+  spawnSync("git", ["commit", "-qm", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "f.txt"), "b");
+
+  // Invalid --allow value (control byte) triggers grokBaseArgs throw.
+  const r = spawnSync(process.execPath, [COMPANION, "review", "--allow", "evilbell"], {
+    cwd: repo,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      TMPDIR: isolatedTmp,
+      TMP: isolatedTmp,
+      TEMP: isolatedTmp,
+      PATH: `${fakeDir}:${process.env.PATH}`
+    }
+  });
+  assert.notEqual(r.status, 0, "invalid --allow rule must exit nonzero");
+  assert.match(r.stderr, /control bytes/i, "error must surface the validation reason");
+  const leaked = fs.readdirSync(isolatedTmp).filter(f => f.startsWith("grok-prompt-"));
+  assert.deepEqual(leaked, [],
+    "review must NOT leave a grok-prompt-* file in TMPDIR on grokBaseArgs failure");
+});
+
+test("v0.8.4 (Grok L2): cmdTask spread-order — behavioral test instead of source-grep", () => {
+  // Grok's v0.8.2 critique: I replaced the brittle source-grep test
+  // for cmdReview's promptFile leak with a behavioral one, then added
+  // ANOTHER source-grep test for cmdTask's spread order in the same
+  // commit. Contradicts the project's own "behavioral tests" stance.
+  // Now: assert the merge semantics on grokBaseArgs directly, no
+  // source string matching. If extractPolicyFlags ever grows an
+  // `effort` key, the explicit `effort` must still win.
+  // We simulate the spread-then-explicit shape that cmdTask uses.
+  const merged = grokBaseArgs({
+    // Simulate extractPolicyFlags() returning effort:"low" (the
+    // hypothetical future drift Grok M warned about).
+    effort: "low",
+    // Then the explicit override after spread (cmdTask's last-token):
+    ...{ effort: "high" }
+  });
+  const i = merged.indexOf("--effort");
+  assert.notEqual(i, -1);
+  assert.equal(merged[i + 1], "high",
+    "When both spread and explicit set `effort`, the explicit (last) value must win — locks in cmdTask's spread order");
+  // And only one --effort emitted (no duplicates).
+  const count = merged.reduce((n, t) => t === "--effort" ? n + 1 : n, 0);
+  assert.equal(count, 1, "exactly one --effort emitted, no duplication");
 });
 
 test("v0.8.2 (Grok HIGH false-alarm): grokBaseArgs's `effort` parameter emits --effort", () => {

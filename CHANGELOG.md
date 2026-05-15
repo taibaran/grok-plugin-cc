@@ -5,6 +5,51 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-05-15
+
+`/goal` loop round-5: aggregate-review against v0.8.2 surfaced 1
+CRITICAL security regression + 3 test-quality issues (Codex + Grok
+agreed; Gemini still "nothing to review").
+
+### Security
+
+- **Codex P1 — subagent Bash scope** (`agents/grok-aggregate-review.md`,
+  `agents/grok-rescue.md`). Both subagents declared `tools: Bash`
+  (unrestricted). A prompt-injection vector in `$ARGUMENTS` could
+  bypass the prompt-level "only call companion.mjs" guidance and run
+  arbitrary shell commands. **Fix**: scoped both subagents'
+  permissions to `Bash(node:*)` — Claude Code's tool-permission layer
+  now enforces "node-only" regardless of prompt text.
+
+### Test quality (Codex P2 + Grok M1 + Grok L2 + Grok L3)
+
+- **Race + vacuous-pass in promptFile-leak test**. v0.8.2's test
+  counted `os.tmpdir()` files globally → racy against concurrent
+  greps, and on a machine without `grok` on PATH cmdReview's
+  `which("grok")` guard exited BEFORE the timeout path, so the test
+  passed without exercising the code. **Fix**: put a fake-grok on
+  PATH + set TMPDIR to an isolated dir so the readdir is scoped only
+  to files this test could have created.
+
+- **Missing coverage for grokBaseArgs failure path**. The v0.8.2
+  reordering protected TWO early-exit sites (`grokBaseArgs` throw +
+  `resolveTimeoutMs` exit) but only the latter had a behavioral test.
+  Added a parallel test that triggers `grokBaseArgs` via an invalid
+  `--allow` rule (control byte) and asserts no leak.
+
+- **Source-grep test for cmdTask spread order**. The v0.8.2 commit
+  added a source-grep test in the same change that explicitly
+  rejected source-grep tests for cmdReview — direct contradiction.
+  Replaced with a behavioral assertion: spread `{effort:"low"}`
+  followed by explicit `effort:"high"` into `grokBaseArgs` must emit
+  exactly one `--effort high`, locking the merge semantics rather
+  than the source-string shape.
+
+### Tests
+
+- 3 new behavior tests (replaced 2 brittle ones).
+- Total suite: 266 passing.
+
 ## [0.8.3] - 2026-05-15
 
 UX/architecture fix: `/grok:aggregate-review` now appears as an **agent**

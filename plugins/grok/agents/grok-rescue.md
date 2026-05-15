@@ -2,7 +2,11 @@
 name: grok-rescue
 description: Proactively use when Claude Code wants a second implementation or diagnosis pass from xAI Grok, needs a deeper root-cause investigation against Grok's 512K-token context, should produce a long-form research report leveraging Grok's distinct training (live web/X search awareness, code-focused models), or should hand any substantial task to Grok through the shared runtime instead of invoking the `grok` CLI directly
 model: sonnet
-tools: Bash
+# v0.8.4 (Codex P1): scope to Bash(node:*) so the subagent can ONLY
+# invoke node — not arbitrary shell commands. See
+# agents/grok-aggregate-review.md for the rationale; same defense
+# applies here for /grok:rescue.
+tools: Bash(node:*)
 skills:
   - grok-cli-runtime
   - grok-prompting

@@ -2,7 +2,14 @@
 name: grok-aggregate-review
 description: Use when the main Claude thread wants a multi-LLM consensus on a code review — captures the current diff and dispatches the same review prompt to Codex / Gemini / Grok in parallel, then aggregates verdicts into a unified report. Prefer this over the raw `/grok:review` when the user asks for "all three opinions" or "second/third opinion" or before merging substantial changes.
 model: sonnet
-tools: Bash
+# v0.8.4 (Codex P1): scope to Bash(node:*) so the subagent can ONLY
+# invoke node — not arbitrary shell commands. Earlier the rescue/
+# aggregate-review subagents had unrestricted `tools: Bash`, which
+# meant a prompt-injection vector in $ARGUMENTS could escape the
+# narrow "only call companion.mjs" prompt guidance and run other
+# shell commands in the workspace. Scoped permission is enforced
+# by Claude Code's tool-permission layer regardless of prompt text.
+tools: Bash(node:*)
 skills:
   - grok-cli-runtime
 ---

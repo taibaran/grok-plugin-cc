@@ -45,7 +45,12 @@ export function parseArgs(argv, {
   // v0.8.0: repeatable value flags accumulate into an array instead of
   // overwriting. Required for `--allow`/`--deny`/`--rules` which Grok
   // accepts multiple times.
-  repeatableFlags = new Set()
+  repeatableFlags = new Set(),
+  // v0.9.0: optional-value flags. `--flag` alone = true; `--flag value`
+  // or `--flag=value` = the value. Required for Grok's `-w/--worktree
+  // [<NAME>]` and `-r/--resume [<SESSION_ID>]` which both have optional
+  // positional values.
+  optionalValueFlags = new Set()
 } = {}) {
   const tokens = tokenize(argv);
   const flags = {};
@@ -83,6 +88,24 @@ export function parseArgs(argv, {
       if (inline === undefined) i++;
       continue;
     }
+    if (optionalValueFlags.has(rawKey)) {
+      // v0.9.0: optional-value flags. If the user passed inline (`--flag=v`),
+      // that's the value. Otherwise peek at the next token: if it exists
+      // and doesn't start with `--`, take it as the value; otherwise this
+      // is a bare flag (value === true).
+      if (inline !== undefined) {
+        flags[rawKey] = inline;
+      } else {
+        const next = tokens[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          flags[rawKey] = next;
+          i++;
+        } else {
+          flags[rawKey] = true;
+        }
+      }
+      continue;
+    }
     // Unknown flag — keep as positional for downstream handling.
     positional.push(t);
   }
@@ -91,7 +114,10 @@ export function parseArgs(argv, {
 
 export const COMMON_BOOL_FLAGS = new Set([
   "json", "wait", "background", "all", "write", "read-only",
-  "resume", "fresh", "resume-last", "continue",
+  // v0.9.0: `resume` moved to COMMON_OPTIONAL_VALUE_FLAGS (it accepts an
+  // optional session id now). `continue` moved to the v0.9.0 session
+  // passthrough group below.
+  "fresh", "resume-last",
   "enable-review-gate", "disable-review-gate",
   // v0.6.0 Grok-specific differentiator flags
   "check",                // --check: self-verification loop (headless)
@@ -102,11 +128,14 @@ export const COMMON_BOOL_FLAGS = new Set([
   // v0.8.0 Grok CLI bool kill-switches
   "no-subagents",         // --no-subagents: forbid grok from spawning its own subagents
   "no-plan",              // --no-plan: skip the planning turn
-  "verbatim"              // --verbatim: send the prompt exactly as given (no plugin rewriting)
-  // v0.8.1: --restore-code was here but not wired through grokBaseArgs /
-  // extractPolicyFlags / capabilityProbe. Removed (Grok aggregate-review
-  // round-2 HIGH). Will be re-added in v0.9.0 alongside --continue /
-  // --resume / --session-id when the resume path is built.
+  "verbatim",             // --verbatim: send the prompt exactly as given (no plugin rewriting)
+  // v0.9.0 — session & memory passthroughs (this group is bool-only;
+  // --resume / --worktree take optional values and live in
+  // COMMON_OPTIONAL_VALUE_FLAGS instead).
+  "continue",             // -c, --continue: continue the most recent session for cwd
+  "restore-code",         // --restore-code: checkout the original session's commit on resume
+  "no-memory",            // --no-memory: disable cross-session memory for this call
+  "experimental-memory"   // --experimental-memory: enable cross-session memory for this call
 ]);
 
 export const COMMON_VALUE_FLAGS = new Set([
@@ -131,6 +160,15 @@ export const COMMON_REPEATABLE_FLAGS = new Set([
   "allow",                // --allow <rule>: ToolPrefix(glob) permission rule
   "deny",                 // --deny  <rule>: same syntax
   "rules"                 // --rules <text>: extra system-prompt rules (also accepts @file)
+]);
+
+// v0.9.0: optional-value flags. Grok's CLI exposes `-w, --worktree
+// [<NAME>]` and `-r, --resume [<SESSION_ID>]` — both accept either no
+// value (auto-generate / most-recent) OR a positional value. The parser
+// classifies the next token as a value when it doesn't start with `--`.
+export const COMMON_OPTIONAL_VALUE_FLAGS = new Set([
+  "worktree",             // --worktree [<name>]: start session in new git worktree
+  "resume"                // --resume [<session-id>]: resume by id, or most-recent if omitted
 ]);
 
 // Parse a duration string. Accepts "30d", "12h", "45m", "60s", "500ms", or a

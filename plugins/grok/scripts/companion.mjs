@@ -15,7 +15,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, parseDuration } from "./lib/args.mjs";
+import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS, parseDuration } from "./lib/args.mjs";
 import {
   ensureDir, jobsDir, newJobId,
   writeJobMeta, readJobMeta, listJobs, pruneJobs,
@@ -381,6 +381,13 @@ function extractPolicyFlags(flags) {
   if (flags["permission-mode"] != null) out.permissionMode = flags["permission-mode"];
   if (flags.sandbox != null) out.sandbox = flags.sandbox;
   if (flags.agent != null) out.agent = flags.agent;
+  // v0.9.0 — session / worktree / memory passthroughs
+  if (flags.worktree != null) out.worktree = flags.worktree;
+  if (flags.continue) out.continueSession = true;
+  if (flags.resume != null) out.resume = flags.resume;
+  if (flags["restore-code"]) out.restoreCode = true;
+  if (flags["no-memory"]) out.noMemory = true;
+  if (flags["experimental-memory"]) out.experimentalMemory = true;
   return out;
 }
 
@@ -2065,6 +2072,124 @@ async function cmdAggregateReview({ flags, positional }) {
   process.exit(failed.length > 0 ? 1 : 0);
 }
 
+// ---------- v0.9.0: thin subcommand wrappers ----------
+//
+// /grok:worktree, /grok:sessions, /grok:memory, /grok:mcp, /grok:sandbox
+// all share the same shape: wrap a `grok <subcmd> [...]` invocation with
+// the plugin's standard env scrubbing + ANSI sanitization + timeout +
+// auth-hint surface. Centralized here to avoid 5 copies of the same
+// boilerplate.
+const DEFAULT_SUB_TIMEOUT_MS = 30 * 1000;
+const ALLOWED_GROK_SUBCOMMAND_ARGS = /^[A-Za-z0-9._:@/+=-]+$/;
+function cmdGrokSubcommandPassthrough({ subcommand, flags, positional, label, allowFlags = new Set(), defaultTimeoutMs = DEFAULT_SUB_TIMEOUT_MS }) {
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  // Construct argv. positional tokens are passed straight through but
+  // each one must match a conservative whitelist (alphanumerics + a
+  // few punctuation chars). Prevents shell-meta or control-byte
+  // injection if a malicious LLM prompt gets pasted in here.
+  const safePos = [];
+  for (const p of positional) {
+    const s = String(p);
+    if (s.length > 256 || !ALLOWED_GROK_SUBCOMMAND_ARGS.test(s)) {
+      console.error(`Refusing to forward argument with special chars: ${s.slice(0, 64)}`);
+      process.exit(2);
+    }
+    // Defense in depth: refuse positionals that look like CLI flags
+    // (start with `--` or `-X` for any single char). Unknown flags
+    // fall into positional via parseArgs; we don't want to silently
+    // forward them to grok. The slash command's arg-hint documents
+    // what's accepted; anything else is rejected here.
+    if (s.startsWith("--") || (s.length >= 2 && s.startsWith("-") && /^-[A-Za-z]/.test(s))) {
+      console.error(`Refusing to forward unknown flag-like argument: ${s.slice(0, 64)}`);
+      process.exit(2);
+    }
+    safePos.push(s);
+  }
+  // Selected flags are passed through. Only flags in `allowFlags` are
+  // forwarded; unknown flags are dropped (the slash command's arg-hint
+  // documents what's accepted).
+  const safeFlags = [];
+  for (const [k, v] of Object.entries(flags)) {
+    if (!allowFlags.has(k)) continue;
+    if (v === true) safeFlags.push(`--${k}`);
+    else if (typeof v === "string" || typeof v === "number") {
+      const sv = String(v);
+      if (sv.length > 256 || /[\x00-\x1f\x7f]/.test(sv)) continue;
+      safeFlags.push(`--${k}`, sv);
+    }
+  }
+  const argv = [subcommand, ...safePos, ...safeFlags];
+  const timeoutMs = resolveTimeoutMs(flags.timeout, defaultTimeoutMs);
+  const spawnOpts = {
+    encoding: "utf8",
+    env: cleanGrokEnv(),
+    maxBuffer: HEADLESS_GROK_MAX_BUFFER
+  };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+  const r = spawnSync("grok", argv, spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    process.stderr.write(`\n[grok-plugin] ${label} timed out after ${timeoutMs}ms.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
+  if (r.error) {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] ${label} failed: ${r.error.code || r.error.message}\n`);
+    if (r.error.code === "ENOBUFS") {
+      process.stderr.write(`[grok-plugin] ${label} output exceeded ${HEADLESS_GROK_MAX_BUFFER} bytes.\n`);
+    }
+    process.exit(1);
+  }
+  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+  if (r.status !== 0) {
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
+    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+  }
+  process.exit(r.status ?? 0);
+}
+
+function cmdWorktree({ flags, positional }) {
+  return cmdGrokSubcommandPassthrough({
+    subcommand: "worktree",
+    flags, positional,
+    label: "worktree",
+    allowFlags: new Set(["json"]),
+    defaultTimeoutMs: 30 * 1000
+  });
+}
+function cmdSessions({ flags, positional }) {
+  return cmdGrokSubcommandPassthrough({
+    subcommand: "sessions",
+    flags, positional,
+    label: "sessions",
+    allowFlags: new Set(["json"]),
+    defaultTimeoutMs: 30 * 1000
+  });
+}
+function cmdMemory({ flags, positional }) {
+  return cmdGrokSubcommandPassthrough({
+    subcommand: "memory",
+    flags, positional,
+    label: "memory",
+    allowFlags: new Set(["json"]),
+    defaultTimeoutMs: 30 * 1000
+  });
+}
+function cmdMcp({ flags, positional }) {
+  return cmdGrokSubcommandPassthrough({
+    subcommand: "mcp",
+    flags, positional,
+    label: "mcp",
+    allowFlags: new Set(["json"]),
+    // mcp doctor probes server health which can be slow; bump to 2 min.
+    defaultTimeoutMs: 2 * 60 * 1000
+  });
+}
+
 // ---------- v0.8.0: /grok:inspect ----------
 //
 // Wraps `grok inspect`. The CLI emits a structured dump (plain or
@@ -2118,7 +2243,7 @@ function cmdInspect({ flags }) {
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|worktree|sessions|memory|mcp|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
@@ -2126,7 +2251,8 @@ async function main() {
     args = parseArgs(rest, {
       boolFlags: COMMON_BOOL_FLAGS,
       valueFlags: COMMON_VALUE_FLAGS,
-      repeatableFlags: COMMON_REPEATABLE_FLAGS
+      repeatableFlags: COMMON_REPEATABLE_FLAGS,
+      optionalValueFlags: COMMON_OPTIONAL_VALUE_FLAGS
     });
   } catch (e) {
     if (e.code === "MISSING_VALUE") { console.error(e.message); process.exit(2); }
@@ -2145,13 +2271,17 @@ async function main() {
     case "best-of": return cmdBestOf(args);
     case "aggregate-review": return await cmdAggregateReview(args);
     case "inspect": return cmdInspect(args);
+    case "worktree": return cmdWorktree(args);
+    case "sessions": return cmdSessions(args);
+    case "memory": return cmdMemory(args);
+    case "mcp": return cmdMcp(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
     case "cancel": return await cmdCancel(args);
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|worktree|sessions|memory|mcp|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

@@ -301,9 +301,14 @@ test("v0.8.1 (Codex P3): repeatable --rules=text with `=` works too", () => {
   assert.deepEqual(r.flags.rules, ["k=v", "other=thing"]);
 });
 
-test("v0.8.1 (Grok HIGH): --restore-code no longer in COMMON_BOOL_FLAGS", () => {
-  assert.equal(COMMON_BOOL_FLAGS.has("restore-code"), false,
-    "--restore-code was registered but never wired through — removed in v0.8.1 until v0.9.0 session resume lands");
+test("v0.9.0: --restore-code re-added (now wired through grokBaseArgs + capabilityProbe)", () => {
+  // v0.8.1 removed --restore-code from COMMON_BOOL_FLAGS because it was
+  // accepted by the parser but ignored everywhere downstream — registering
+  // a flag that does nothing is a footgun (Grok HIGH round-2). v0.9.0
+  // re-adds it alongside the rest of the session-resume passthroughs
+  // (--continue, --resume, --session-id) and this time wires it through
+  // grokBaseArgs + capabilityProbe so it actually reaches grok.
+  assert.equal(COMMON_BOOL_FLAGS.has("restore-code"), true);
 });
 
 test("v0.8.1 (Grok MED #1): --allow rejects TAB and NEWLINE in rule strings", () => {

@@ -64,6 +64,10 @@ prints `Grok plugin is ready.`, you can use any of the commands below.
 | `/grok:best-of <N> <prompt>` | Run a prompt N ways in parallel (`grok --best-of-n N`, capped at 8) and return Grok's best answer. |
 | `/grok:aggregate-review [focus]` | Run the same diff-review against codex + gemini + grok in parallel; aggregate verdicts into a unified report. Needs ≥2 CLIs installed. |
 | `/grok:inspect [--json]` | Show the merged Grok config (AGENTS.md, skills, MCP, rules, permissions) that will apply to the next call. |
+| `/grok:worktree [list\|gc\|rm <name>]` | Manage Grok-managed git worktrees (used by the `--worktree` flag on ask/research/rescue). |
+| `/grok:sessions [list\|search <q>\|restore <id>]` | List, search, or restore Grok-native sessions (separate from plugin job ids). |
+| `/grok:memory [edit\|stats\|clear\|enable\|disable]` | View / edit / wipe Grok's cross-session memory. |
+| `/grok:mcp [list\|add\|remove\|doctor]` | Manage MCP servers configured for Grok. |
 | `/grok:imagine <description>` | Generate an image from text using Grok Imagine. Returns the saved file path. |
 | `/grok:imagine-video <description>` | Generate a video from text using Grok Imagine. Returns the saved file path. |
 | `/grok:rescue <task>` | Delegate investigation, debugging, or a substantial task to Grok via the `grok-rescue` subagent. |

@@ -221,7 +221,14 @@ export function capabilityProbe() {
     "--system-prompt-override",
     "--verbatim",
     "--sandbox",
-    "--agent"
+    "--agent",
+    // v0.9.0 — session / worktree / memory passthroughs
+    "-w, --worktree",
+    "-c, --continue",
+    "-r, --resume",
+    "--restore-code",
+    "--no-memory",
+    "--experimental-memory"
   ];
   const missing = required.filter(token => !help.includes(token));
   return { ok: missing.length === 0, missing };
@@ -410,7 +417,14 @@ export function grokBaseArgs({
   verbatim = false,       // --verbatim
   permissionMode,         // string | undefined — user-selectable; overrides readOnly's default
   sandbox,                // string | undefined — --sandbox <profile>
-  agent                   // string | undefined — --agent <name>
+  agent,                  // string | undefined — --agent <name>
+  // v0.9.0 — session / worktree / memory passthroughs
+  worktree,               // string|true|undefined — --worktree [<name>]: bool form (true) or named
+  continueSession = false,// --continue: continue most-recent session for cwd
+  resume,                 // string|true|undefined — --resume [<session-id>]: bool or named id
+  restoreCode = false,    // --restore-code: checkout the session's original commit on resume
+  noMemory = false,       // --no-memory: disable cross-session memory for this call
+  experimentalMemory = false // --experimental-memory: enable cross-session memory for this call
 } = {}) {
   const args = [
     "--output-format", jsonOutput ? "json" : "plain",
@@ -548,6 +562,41 @@ export function grokBaseArgs({
     }
     args.push("--agent", s);
   }
+
+  // v0.9.0 session / worktree / memory.
+  //
+  // --worktree may be `true` (bare flag, auto-generate name) OR a string
+  // name. Validate names same as --agent/--sandbox: short, no control bytes,
+  // no path separators (worktree names can't contain `/` per git semantics).
+  if (worktree === true) {
+    args.push("--worktree");
+  } else if (worktree != null && worktree !== "") {
+    const s = String(worktree);
+    if (s.length > 128 || CONTROL_BYTE_STRICT.test(s) || s.includes("/")) {
+      throw new Error(`--worktree name invalid: ${s.slice(0, 32)}`);
+    }
+    args.push("--worktree", s);
+  }
+  if (continueSession) args.push("--continue");
+  if (resume === true) {
+    args.push("--resume");
+  } else if (resume != null && resume !== "") {
+    // Session IDs come in many shapes (UUIDs, ULIDs, hex). Be permissive
+    // but defuse control-byte / newline injection.
+    const s = String(resume);
+    if (s.length > 256 || CONTROL_BYTE_STRICT.test(s)) {
+      throw new Error(`--resume session id invalid: ${s.slice(0, 32)}`);
+    }
+    args.push("--resume", s);
+  }
+  if (restoreCode) args.push("--restore-code");
+  if (noMemory && experimentalMemory) {
+    // grok itself accepts either, but not both. Catch this at the
+    // plugin layer for a clearer error.
+    throw new Error("--no-memory and --experimental-memory are mutually exclusive");
+  }
+  if (noMemory) args.push("--no-memory");
+  if (experimentalMemory) args.push("--experimental-memory");
   return args;
 }
 

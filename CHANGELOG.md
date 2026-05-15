@@ -5,6 +5,85 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-05-15
+
+**"Native Grok Differentiators"** — the second 4-LLM-consensus release.
+Closes the largest known-gap list from v0.6.0's CHANGELOG ("Known gaps")
+plus the v0.8.0 4-LLM research roadmap.
+
+### New commands
+
+- **`/grok:worktree [list|gc|rm <name>]`** — wraps `grok worktree`. Pairs
+  with the new `--worktree [<name>]` flag on every prompt-accepting
+  command. Lets Grok run inside a fresh git worktree so edits stay
+  isolated from the main checkout.
+
+- **`/grok:sessions [list|search|restore]`** — wraps `grok sessions`.
+  Surfaces Grok's native session store (`~/.grok/sessions/...`), which
+  is separate from the plugin's own job-id system (`/grok:status`,
+  `/grok:result`). Pair with `--resume <id>` to continue.
+
+- **`/grok:memory [edit|stats|clear|enable|disable]`** — wraps
+  `grok memory`. Surfaces Grok's cross-session memory store.
+
+- **`/grok:mcp [list|add|remove|doctor]`** — wraps `grok mcp`. Manage
+  MCP (Model Context Protocol) servers configured for Grok.
+
+### New passthrough flags (across ask / review / research / best-of / rescue / aggregate-review)
+
+- **`--worktree [<name>]`** — start Grok session inside a fresh git
+  worktree, optionally named.
+- **`-c, --continue`** — continue the most-recent Grok session for cwd.
+- **`-r, --resume [<session-id>]`** — resume by id, or by most-recent
+  if omitted.
+- **`--restore-code`** — re-added (this time properly wired through
+  `grokBaseArgs` + `capabilityProbe`; was removed in v0.8.1 as a stub).
+- **`--no-memory`** — disable cross-session memory for this call.
+- **`--experimental-memory`** — enable cross-session memory for this
+  call (mutex with `--no-memory`).
+
+### Parser additions
+
+- New `COMMON_OPTIONAL_VALUE_FLAGS` set + `optionalValueFlags` parser
+  option. Required for Grok's `-w/--worktree [<NAME>]` and
+  `-r/--resume [<SESSION_ID>]` which both have an optional positional
+  value. The parser classifies the next token as a value when it
+  doesn't start with `--`.
+
+### Hardening
+
+- **`cmdGrokSubcommandPassthrough`** — centralized helper for all 4
+  new wrapper commands. Each spawn:
+  - Goes through `cleanGrokEnv()` (env scrubbing)
+  - Wraps output in `sanitizeForTerminal()` (ANSI defense)
+  - Refuses positional args that match a flag pattern (`--*` or `-X`)
+    — defense against parser unknowns getting silently forwarded to
+    grok where they'd surface as confusing "unknown option" stderr.
+  - Validates each positional against
+    `/^[A-Za-z0-9._:@/+=-]+$/` (no shell-meta).
+  - Allowlists which `--<flag>` are forwarded per command (e.g. only
+    `--json` for now; others are dropped).
+  - Sets `maxBuffer = HEADLESS_GROK_MAX_BUFFER` with ENOBUFS detection
+    (consistent with other commands).
+
+- **`capabilityProbe` extended** with all 6 new flag tokens. Same G1
+  motivation as v0.6.0 + v0.8.0: if grok renames any of these, setup
+  fails cleanly with an actionable error message.
+
+### Tests
+
+- New `tests/v0-9-0-native-grok.test.mjs` — 23 behavior tests:
+  - Optional-value parser semantics (bool form, named form, inline `=`,
+    `--`-prefix lookahead)
+  - `grokBaseArgs` worktree/resume/continue/restore-code/memory flag
+    emission + validation (control bytes, path separators, mutex)
+  - End-to-end subprocess passthrough for the 4 wrapper commands via
+    fake-grok with PATH override
+  - Security: shell-meta in positional rejected, unknown `--*` in
+    positional rejected
+  - capabilityProbe regression
+- Total suite: 306 passing (+25).
+
 ## [0.8.9] - 2026-05-15
 
 `/goal` round-10 was the **first round with no correctness findings** —

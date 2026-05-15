@@ -5,6 +5,53 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-05-15
+
+Architectural fix for `/grok:aggregate-review` — addresses a real
+concern raised by the user during v0.7.0 review: spawning raw
+codex/gemini binaries from inside our Node code bypassed each peer
+plugin's safety layer.
+
+### What changed
+
+Each reviewer's `detect()` now returns either `{kind: "peer", path}`
+(peer plugin's companion.mjs found in `~/.claude/plugins/cache/`) or
+`{kind: "cli", path}` (raw CLI on PATH). The reviewer's `buildCmd()`
+routes through whichever was found.
+
+Peer routing invokes `node <peer-companion>.mjs <review|adversarial-review> --wait`,
+which:
+- Inherits the peer plugin's prompt-file handling (no ARG_MAX risk).
+- Inherits the peer plugin's env scrubbing + ANSI sanitization.
+- Inherits the peer plugin's capability probes + auth handling +
+  fallback model chain.
+- Is sync-by-design (`--wait` blocks until the job completes).
+
+The previous raw-CLI path (with v0.7.0 round-2 hardening) stays as
+the fallback when a peer plugin isn't installed.
+
+### Why not the rescue subagents directly
+
+`codex:codex-rescue` and `gemini:gemini-rescue` return acknowledgement
+stubs instead of actual results (upstream bug — see
+[openai/codex-plugin-cc#324](https://github.com/openai/codex-plugin-cc/issues/324)
+and [taibaran/gemini-plugin-cc#3](https://github.com/taibaran/gemini-plugin-cc/issues/3)).
+Until those land, calling each peer plugin's `companion.mjs review --wait`
+directly is the best available route through the peer plugin layer.
+
+### Output changes
+
+- Header line now annotates each reviewer with `(via peer)` or `(via cli)`.
+- Per-reviewer detail line shows `Via: peer` / `Via: cli`.
+
+### Tests
+
+- 5 new behavior tests cover: `findPeerCompanion` semver-descending
+  version pick; `PEER_PLUGIN_LOOKUP` coverage of codex / gemini / grok;
+  each reviewer's `detect()` consulting `findPeerCompanion` first;
+  `<sub> --wait` being passed to all 3 peer plugins; output annotations.
+- Total suite: 222 passing.
+
 ## [0.7.0] - 2026-05-15
 
 Meta-aggregator command for multi-LLM consensus reviews.

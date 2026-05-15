@@ -27,7 +27,7 @@ import {
   detectAuthSource, grokBaseArgs, effectiveModel, DEFAULT_MODEL,
   cleanGrokEnv, probeWithFallback, checkMinVersion, MIN_GROK_VERSION,
   MODEL_FALLBACK_CHAIN, capabilityProbe,
-  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS
+  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal } from "./lib/render.mjs";
@@ -1359,6 +1359,66 @@ function cmdBestOf({ flags, positional }) {
 }
 
 // ============================================================================
+// v0.7.1: peer-plugin discovery for /grok:aggregate-review
+// ============================================================================
+//
+// The user flagged a real architectural concern in v0.7.0: spawning raw
+// codex/gemini binaries from inside our Node code bypasses each peer
+// plugin's safety layer (env scrubbing, prompt-file handling, capability
+// probes, fallback model chains, auth handling). The "proper" interface
+// (the rescue subagent system) is blocked upstream by the stub bugs we
+// filed (codex-plugin-cc#324, gemini-plugin-cc#3).
+//
+// v0.7.1 routes through each peer plugin's `companion.mjs review --wait`
+// where available. That preserves uniform prompt control + uniform output
+// shape (each plugin already wraps its CLI with the same defenses we'd
+// otherwise re-implement) and is sync-by-design (`--wait` blocks until
+// the job completes). Raw-CLI spawn stays as a fallback when a peer
+// plugin isn't installed.
+
+// Cache root for installed Claude Code plugins.
+const CC_PLUGIN_CACHE = path.join(os.homedir(), ".claude/plugins/cache");
+
+// Map of reviewer-name → peer-plugin lookup data. cacheName is the
+// directory under ~/.claude/plugins/cache/. The scriptName is the
+// companion.mjs file inside the plugin's scripts/ dir. We pick the
+// highest-version directory available (peer plugins use semver-named
+// version subdirs).
+const PEER_PLUGIN_LOOKUP = {
+  codex:  { cacheName: "openai-codex",     scriptName: "codex-companion.mjs" },
+  gemini: { cacheName: "gemini-plugin-cc", scriptName: "companion.mjs" },
+  grok:   { cacheName: "grok-plugin-cc",   scriptName: "companion.mjs" }
+};
+
+// Find a peer plugin's companion.mjs by walking the well-known cache
+// layout: `~/.claude/plugins/cache/<cacheName>/<plugin>/<version>/scripts/<scriptName>`.
+// Returns the highest-semver version's absolute path, or null.
+function findPeerCompanion(reviewerName) {
+  const spec = PEER_PLUGIN_LOOKUP[reviewerName];
+  if (!spec) return null;
+  const cacheRoot = path.join(CC_PLUGIN_CACHE, spec.cacheName);
+  let pluginsLevel;
+  try { pluginsLevel = fs.readdirSync(cacheRoot, { withFileTypes: true }); }
+  catch { return null; }
+  for (const plugDir of pluginsLevel) {
+    if (!plugDir.isDirectory()) continue;
+    const plugRoot = path.join(cacheRoot, plugDir.name);
+    let versions;
+    try { versions = fs.readdirSync(plugRoot); }
+    catch { continue; }
+    // Highest semver first — same compareVersions used by /grok:setup.
+    versions.sort((a, b) => compareVersions(b, a));
+    for (const ver of versions) {
+      const candidate = path.join(plugRoot, ver, "scripts", spec.scriptName);
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch { /* keep looking */ }
+    }
+  }
+  return null;
+}
+
+// ============================================================================
 // v0.7.0: /grok:aggregate-review — multi-LLM consensus review
 // ============================================================================
 //
@@ -1387,56 +1447,114 @@ const DEFAULT_AGG_TIMEOUT_MS = 10 * 60 * 1000;   // 10m per reviewer
 // any legitimate review answer while bounding heap pressure.
 const MAX_REVIEWER_BUF = 16 * 1024 * 1024;
 
+// v0.7.1: each reviewer first tries its peer plugin's companion.mjs
+// (review --wait) which runs the diff through the peer plugin's safety
+// layer (env scrubbing, prompt-file handling, capability probes, etc.).
+// Falls back to raw-CLI spawn (v0.7.0 hardened path) when the peer
+// plugin is not installed.
 const AGG_REVIEWERS = [
   {
     name: "codex",
     label: "Codex (OpenAI)",
-    detect: () => which("codex"),
-    // Codex reads from stdin when --skip-git-repo-check is set; the
-    // existing `task` command path uses the same trick. No ARG_MAX risk.
-    buildCmd: ({ promptText }) => ({
-      cmd: "codex",
-      args: ["exec", "--skip-git-repo-check"],
-      stdin: promptText,
-      isPlainText: true
-    })
+    detect: () => {
+      const peer = findPeerCompanion("codex");
+      if (peer) return { kind: "peer", path: peer };
+      const cli = which("codex");
+      if (cli) return { kind: "cli", path: cli };
+      return null;
+    },
+    buildCmd: ({ detection, promptText, base, scope, adversarial }) => {
+      if (detection.kind === "peer") {
+        const sub = adversarial ? "adversarial-review" : "review";
+        const args = [detection.path, sub, "--wait"];
+        if (base) args.push("--base", base);
+        if (scope) args.push("--scope", scope);
+        return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
+      }
+      return {
+        cmd: "codex",
+        args: ["exec", "--skip-git-repo-check"],
+        stdin: promptText,
+        isPlainText: true,
+        via: "cli"
+      };
+    }
   },
   {
     name: "gemini",
     label: "Gemini (Google)",
-    detect: () => which("gemini"),
-    // v0.7.0 round-2 (3/3 reviewers agreed): passing the full multi-MB
-    // prompt as `-p <inline>` is ARG_MAX-unsafe and crashes on real-world
-    // diffs. Gemini supports `-p "" + stdin`: when -p is empty and stdin
-    // has content, the stdin becomes the prompt body. Empirically verified.
-    buildCmd: ({ promptText }) => ({
-      cmd: "gemini",
-      args: ["--skip-trust", "--approval-mode", "plan", "-p", ""],
-      stdin: promptText,
-      isPlainText: true
-    })
+    detect: () => {
+      const peer = findPeerCompanion("gemini");
+      if (peer) return { kind: "peer", path: peer };
+      const cli = which("gemini");
+      if (cli) return { kind: "cli", path: cli };
+      return null;
+    },
+    buildCmd: ({ detection, promptText, base, scope, adversarial }) => {
+      if (detection.kind === "peer") {
+        const sub = adversarial ? "adversarial-review" : "review";
+        const args = [detection.path, sub, "--wait"];
+        if (base) args.push("--base", base);
+        if (scope) args.push("--scope", scope);
+        return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
+      }
+      return {
+        cmd: "gemini",
+        args: ["--skip-trust", "--approval-mode", "plan", "-p", ""],
+        stdin: promptText,
+        isPlainText: true,
+        via: "cli"
+      };
+    }
   },
   {
     name: "grok",
     label: "Grok (xAI)",
-    detect: () => which("grok"),
-    // v0.7.0 round-2 (3/3 reviewers agreed): grok refuses `-p ""`
-    // ("prompt is empty") so stdin is not viable. Use --prompt-file like
-    // /grok:review already does for multi-MB diffs. The temp file is
-    // created above (writePromptToTempFile with O_EXCL) and unlinked
-    // after the spawn resolves.
-    buildCmd: ({ promptFile, model }) => ({
-      cmd: "grok",
-      args: [
-        "--prompt-file", promptFile,
-        ...grokBaseArgs({ readOnly: true, model, jsonOutput: false }),
-        "--max-turns", "60"
-      ],
-      stdin: null,
-      isPlainText: true
-    })
+    detect: () => {
+      const peer = findPeerCompanion("grok");
+      // For grok we always prefer the local plugin (this very script).
+      // If the cache has a different version installed, we still call
+      // it — the user's installed plugin is the source of truth, not
+      // our dev tree. But also fall back to our own __filename when
+      // running from a checkout that isn't installed.
+      if (peer) return { kind: "peer", path: peer };
+      const selfPath = fileURLToPathLocal(import.meta.url);
+      if (selfPath && fs.existsSync(selfPath)) return { kind: "peer", path: selfPath };
+      const cli = which("grok");
+      if (cli) return { kind: "cli", path: cli };
+      return null;
+    },
+    buildCmd: ({ detection, promptFile, model, base, scope, adversarial }) => {
+      if (detection.kind === "peer") {
+        const sub = adversarial ? "adversarial-review" : "review";
+        const args = [detection.path, sub, "--wait"];
+        if (base) args.push("--base", base);
+        if (scope) args.push("--scope", scope);
+        if (model) args.push("--model", model);
+        return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
+      }
+      return {
+        cmd: "grok",
+        args: [
+          "--prompt-file", promptFile,
+          ...grokBaseArgs({ readOnly: true, model, jsonOutput: false }),
+          "--max-turns", "60"
+        ],
+        stdin: null,
+        isPlainText: true,
+        via: "cli"
+      };
+    }
   }
 ];
+
+function fileURLToPathLocal(u) {
+  try {
+    // Local helper — avoid importing url module just for this.
+    if (u.startsWith("file://")) return decodeURIComponent(u.slice(7));
+    return u;
+  } catch { return null; }
+}
 
 function parseAggVerdict(out) {
   if (!out) return { verdict: "no-output", blocking: 0, nits: 0 };
@@ -1566,6 +1684,7 @@ function spawnReviewer(spec, common) {
         timedOut,
         errored,
         truncated: stdoutTruncated || stderrTruncated,
+        via: buildResult.via,
         output: cleaned,
         stderr: sanitizeForTerminal(stderr).slice(0, 4000),
         ...parseAggVerdict(cleaned)
@@ -1596,17 +1715,29 @@ async function cmdAggregateReview({ flags, positional }) {
     process.exit(0);
   }
 
-  const available = AGG_REVIEWERS.filter(r => r.detect());
+  // v0.7.1: each reviewer's detect() now returns either { kind: "peer",
+  // path } (peer plugin's companion.mjs available) or { kind: "cli",
+  // path } (raw CLI on PATH) or null. We pair each spec with its
+  // detection result so the buildCmd inside spawnReviewer doesn't
+  // re-detect.
+  const available = AGG_REVIEWERS
+    .map(spec => ({ spec, detection: spec.detect() }))
+    .filter(r => r.detection);
   if (available.length === 0) {
     console.error("None of codex / gemini / grok are installed. Install at least one CLI to use /grok:aggregate-review.");
     process.exit(127);
   }
   if (available.length === 1) {
-    console.error(`Only ${available[0].name} is installed; /grok:aggregate-review needs at least two CLIs to be useful. Use /${available[0].name}:ask or /grok:ask instead.`);
+    console.error(`Only ${available[0].spec.name} is installed; /grok:aggregate-review needs at least two reviewers to be useful. Use /${available[0].spec.name}:ask or /grok:ask instead.`);
     process.exit(2);
   }
 
   const target = diffResult.kind + (diffResult.base ? ` (base: ${diffResult.base})` : "");
+  // The prompt + promptFile are still needed for the raw-CLI fallback
+  // path. Peer plugins capture their own diff (we pass --base/--scope
+  // through) and use their own review prompt template, so this prompt
+  // is harmless overhead for the peer path — but creating it costs
+  // nothing meaningful and the unlink at the end is idempotent.
   const prompt = buildReviewPrompt({
     adversarial: !!flags.adversarial,
     focus,
@@ -1618,18 +1749,22 @@ async function cmdAggregateReview({ flags, positional }) {
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_AGG_TIMEOUT_MS);
 
   process.stdout.write(`# /grok:aggregate-review\n`);
-  process.stdout.write(`Reviewers: ${available.map(r => r.name).join(", ")}\n`);
+  process.stdout.write(`Reviewers: ${available.map(r => `${r.spec.name} (via ${r.detection.kind})`).join(", ")}\n`);
   process.stdout.write(`Target: ${target}${focus ? `\nFocus: ${focus}` : ""}\n`);
   process.stdout.write(`Diff size: ${diffResult.diff.length} bytes\n\n`);
   process.stdout.write(`Running ${available.length} reviewers in parallel (per-reviewer timeout: ${timeoutMs}ms)...\n\n`);
 
   let results;
   try {
-    results = await Promise.all(available.map(spec => spawnReviewer(spec, {
+    results = await Promise.all(available.map(r => spawnReviewer(r.spec, {
+      detection: r.detection,
       promptFile,
       promptText: prompt,
       model: flags.model,
-      timeoutMs
+      timeoutMs,
+      base,
+      scope: scope === "auto" ? null : scope,
+      adversarial: !!flags.adversarial
     })));
   } finally {
     try { fs.unlinkSync(promptFile); } catch {}
@@ -1638,7 +1773,7 @@ async function cmdAggregateReview({ flags, positional }) {
   // Per-reviewer detail
   for (const r of results) {
     process.stdout.write(`---\n\n## ${r.label}\n\n`);
-    process.stdout.write(`*Exit: ${r.exitCode} · ${r.elapsedMs}ms${r.timedOut ? " · TIMED OUT" : ""} · Verdict: ${r.verdict} · Blocking: ${r.blocking} · Nits: ${r.nits}*\n\n`);
+    process.stdout.write(`*Exit: ${r.exitCode} · ${r.elapsedMs}ms${r.timedOut ? " · TIMED OUT" : ""} · Via: ${r.via || "?"} · Verdict: ${r.verdict} · Blocking: ${r.blocking} · Nits: ${r.nits}*\n\n`);
     if (r.output) process.stdout.write(r.output.trim() + "\n\n");
     if (r.exitCode !== 0 && r.stderr) {
       process.stdout.write(`<details><summary>stderr</summary>\n\n\`\`\`\n${r.stderr}\n\`\`\`\n\n</details>\n\n`);

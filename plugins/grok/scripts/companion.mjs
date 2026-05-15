@@ -752,6 +752,27 @@ async function cmdReview({ flags, positional }, { adversarial }) {
   }
 
   const target = diffResult.kind + (diffResult.base ? ` (base: ${diffResult.base})` : "");
+
+  // v0.8.2 (Grok aggregate-review round-2 LOW: audit ALL early-exit
+  // paths after writePromptToTempFile). Order matters: every flag
+  // validation that can call process.exit MUST run BEFORE the temp
+  // file is created. resolveTimeoutMs exits on invalid --timeout;
+  // grokBaseArgs throws on invalid policy flags. Validate both first,
+  // then write the file once we know the call will proceed.
+  let baseArgs;
+  try {
+    baseArgs = grokBaseArgs({
+      readOnly: true,
+      model: flags.model,
+      jsonOutput: true,
+      ...extractPolicyFlags(flags)
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_REVIEW_TIMEOUT_MS);
+
   const prompt = buildReviewPrompt({
     adversarial,
     focus,
@@ -762,33 +783,15 @@ async function cmdReview({ flags, positional }, { adversarial }) {
 
   // Grok's headless mode does not consume stdin. The diff goes through
   // --prompt-file so we don't blow ARG_MAX with a multi-MB prompt.
+  // SAFE TO ALLOCATE: every validation above has either exited cleanly
+  // OR produced a usable value. runJob's cleanupPaths handles unlink
+  // on close (success, error, timeout, or disk-overflow).
   const promptFile = writePromptToTempFile(prompt);
 
-  // Internal output is always JSON so we can detect Grok's
-  // exit-0-on-internal-error contract. We re-serialize for the user when
-  // they asked for plain.
-  // v0.8.0: thread --allow/--deny/--rules/etc through review too.
-  let baseArgs;
-  try {
-    baseArgs = grokBaseArgs({
-      readOnly: true,
-      model: flags.model,
-      jsonOutput: true,
-      ...extractPolicyFlags(flags)
-    });
-  } catch (e) {
-    // v0.8.1 (Codex P2.a): the prompt file was already written by
-    // writePromptToTempFile above; we must clean it up on the early-exit
-    // path or the full review diff leaks into /tmp.
-    try { fs.unlinkSync(promptFile); } catch {}
-    console.error(String(e.message || e));
-    process.exit(2);
-  }
   const args = ["--prompt-file", promptFile, ...baseArgs];
   if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_REVIEW_MAX_TURNS));
   if (effort) args.push("--effort", effort);
   if (flags.check) args.push("--check"); // v0.8.0 cross-command consistency — review can self-verify too
-  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_REVIEW_TIMEOUT_MS);
 
   const meta = buildJobMeta({
     kind: adversarial ? "adversarial-review" : "review",
@@ -1039,12 +1042,16 @@ async function cmdTask({ flags, positional }) {
   // matching /grok:ask, /grok:review, /grok:research, /grok:best-of.
   let policyArgs;
   try {
+    // v0.8.2 (Grok aggregate-review round-2 MED): spread extractPolicyFlags
+    // FIRST so the explicit `effort` (already normalized by validateEffort
+    // above) wins if extractPolicyFlags ever grows an effort key. Today
+    // it doesn't, but the spread-order defense is free.
     policyArgs = grokBaseArgs({
       readOnly: !isWrite,
       model: flags.model,
       jsonOutput: false,
-      effort,
-      ...extractPolicyFlags(flags)
+      ...extractPolicyFlags(flags),
+      effort
     });
   } catch (e) {
     console.error(String(e.message || e));

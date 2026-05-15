@@ -5,6 +5,51 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-05-15
+
+Round-3 fixes — `/goal` loop iteration on the v0.8.x line. The
+aggregate-review against v0.8.1 surfaced one real bug (Grok LOW about
+incomplete coverage of early-exit leak paths) and two defensive
+improvements.
+
+### Bug fixes
+
+- **Grok LOW (real bug) — second promptFile leak path in cmdReview**.
+  v0.8.1 added `try { unlink } catch {}` to the `grokBaseArgs` catch,
+  but `resolveTimeoutMs(flags.timeout)` calls `process.exit(2)` on an
+  invalid `--timeout` AFTER `writePromptToTempFile` had already run.
+  **Fix**: reordered cmdReview so EVERY flag validation
+  (`grokBaseArgs`, `resolveTimeoutMs`) runs BEFORE
+  `writePromptToTempFile`. The temp file is now allocated only once
+  the call is guaranteed to proceed; runJob's existing `cleanupPaths`
+  handles unlinking on success/error/timeout/disk-overflow.
+
+- **Grok MED — `cmdTask` spread order**. The v0.8.1 code wrote
+  `{ effort, ...extractPolicyFlags(flags) }`, putting the explicit
+  (validated) `effort` BEFORE the spread. If `extractPolicyFlags` ever
+  grows an `effort` key, the spread would silently overwrite the
+  validated value. Defensive reordering: spread first, explicit
+  `effort` last → explicit always wins.
+
+- **Grok LOW (test brittleness) — source-grep test for cmdReview
+  cleanup**. Replaced with a behavioral test that actually invokes
+  `companion.mjs review --timeout nonsense_value` against a tiny git
+  repo + dirty working tree, then checks `/tmp` for grok-prompt-*
+  files. Immune to Prettier / refactor / formatting changes.
+
+### Defensive additions
+
+- New regression test that `grokBaseArgs({ effort: "high" })` actually
+  emits `--effort high`. Closes Grok's HIGH false-alarm by locking
+  behavior in source-of-truth rather than relying on a future reader
+  to trace the function definition.
+
+### Tests
+
+- 3 new behavior tests in `tests/v0-8-0-permission-rules.test.mjs`
+  (1 replaces a brittle one).
+- Total suite: 264 passing.
+
 ## [0.8.1] - 2026-05-15
 
 Round-2 fixes for v0.8.0, found by running the new `/grok:aggregate-review`

@@ -333,15 +333,60 @@ test("v0.8.1 (Codex P2.b): cmdInspect uses HEADLESS_GROK_MAX_BUFFER + ENOBUFS hi
   assert.match(block, /ENOBUFS/);
 });
 
-test("v0.8.1 (Codex P2.a): cmdReview unlinks promptFile on validation failure", () => {
+test("v0.8.2 (Grok LOW): cmdReview validates BEFORE writePromptToTempFile (no early-exit leak)", t => {
+  // v0.8.1 originally used `try {grokBaseArgs} catch {unlink, exit}`
+  // but a SECOND exit-without-cleanup path was still present:
+  // resolveTimeoutMs(invalid) called process.exit AFTER writePromptToTempFile.
+  // The brittle source-grep test on a specific catch block missed this.
+  //
+  // v0.8.2 reorders: all flag validation happens BEFORE writePromptToTempFile,
+  // so no exit path can run after the temp file exists. Behavioral test:
+  // run /grok:review with an invalid --timeout flag, capture stderr, check
+  // /tmp doesn't grow a grok-prompt-* file.
+  const tmpdir = os.tmpdir();
+  const beforeCount = fs.readdirSync(tmpdir).filter(f => f.startsWith("grok-prompt-")).length;
+  // Need a git repo so captureDiff doesn't bail early
+  const repo = fs.mkdtempSync(path.join(tmpdir, "grok-leak-repo-"));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  spawnSync("git", ["init"], { cwd: repo, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "t@t.t"], { cwd: repo });
+  spawnSync("git", ["config", "user.name", "t"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "f.txt"), "a");
+  spawnSync("git", ["add", "."], { cwd: repo });
+  spawnSync("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "f.txt"), "b");
+
+  // Invalid --timeout triggers resolveTimeoutMs's exit(2).
+  const r = spawnSync(process.execPath, [COMPANION, "review", "--timeout", "nonsense_value"], {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env }
+  });
+  assert.notEqual(r.status, 0, "invalid --timeout must exit nonzero");
+  const afterCount = fs.readdirSync(tmpdir).filter(f => f.startsWith("grok-prompt-")).length;
+  assert.equal(afterCount, beforeCount,
+    "review must NOT leak a grok-prompt-* temp file on validation failure (Grok LOW)");
+});
+
+test("v0.8.2 (Grok MED): cmdTask spread order — extractPolicyFlags FIRST, then effort", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
-  // Look in cmdReview's catch block — must call fs.unlinkSync(promptFile)
-  // before process.exit(2).
-  const cmdReview = src.slice(src.indexOf("async function cmdReview"), src.indexOf("async function cmdImagine"));
-  // Find the try/catch around grokBaseArgs
-  const baseArgsBlock = cmdReview.slice(cmdReview.indexOf("try {"));
-  assert.match(baseArgsBlock, /try\s*{\s*fs\.unlinkSync\(promptFile\)\s*;?\s*}\s*catch\s*{\s*}/,
-    "cmdReview's grokBaseArgs catch must unlink promptFile on validation failure (v0.7.1 promptFile leak)");
+  const cmdTask = src.slice(src.indexOf("async function cmdTask"), src.indexOf("// ----------", src.indexOf("async function cmdTask")));
+  // The fix: spread first, explicit effort last → explicit wins.
+  assert.match(cmdTask, /\.\.\.extractPolicyFlags\(flags\),\s*\n?\s*effort/,
+    "cmdTask must spread extractPolicyFlags BEFORE the explicit `effort` key so the normalized value wins");
+});
+
+test("v0.8.2 (Grok HIGH false-alarm): grokBaseArgs's `effort` parameter emits --effort", () => {
+  // Grok's HIGH finding worried that the cmdTask refactor passed `effort`
+  // into grokBaseArgs but grokBaseArgs might not handle it. False alarm
+  // (grokBaseArgs has handled --effort since v0.6.0), but lock it in
+  // with an explicit regression test so a future change can't break it.
+  const args = grokBaseArgs({ effort: "high" });
+  const i = args.indexOf("--effort");
+  assert.notEqual(i, -1, "grokBaseArgs({ effort: 'high' }) must emit --effort");
+  assert.equal(args[i + 1], "high");
+  const args2 = grokBaseArgs({}); // no effort
+  assert.equal(args2.includes("--effort"), false, "grokBaseArgs without effort must NOT emit --effort");
 });
 
 test("v0.8.1 (Grok MED #2): cmdTask threads policy flags via extractPolicyFlags", () => {

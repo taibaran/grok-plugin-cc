@@ -157,6 +157,43 @@ test("v0.8.7 (Grok M3 round-8): FALLBACK_MIN_BUDGET_MS lowered from 5000 to 2000
   assert.equal(FALLBACK_MIN_BUDGET_MS, 2000);
 });
 
+test("v0.8.8 (3/3 round-9): exhausted positive budget no longer passes 0 (unbounded) to fallback spawn", () => {
+  // The bug: remainingBudgetMs returns 0 for BOTH:
+  //   (a) timeoutMs === 0 (user-unbounded sentinel) — intentional
+  //   (b) timeoutMs > 0 AND elapsed >= timeoutMs (positive-budget overrun)
+  // v0.8.7 conflated these. After v0.8.8 the call site distinguishes via
+  // `userUnbounded = timeoutMs === 0` and only passes `0` to the fallback
+  // when the user asked for unbounded.
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const block = src.slice(
+    src.indexOf("const userUnbounded"),
+    src.indexOf("for (const fb of fallbackResults)")
+  );
+  // Skip-guard now uses `!userUnbounded && budget < MIN`, NOT
+  // `timeoutMs > 0 && budget > 0 && budget < MIN`. The old form let
+  // budget===0 (overrun) slip past.
+  assert.match(block, /!userUnbounded\s*&&\s*budget\s*<\s*FALLBACK_MIN_BUDGET_MS/);
+  // Spawn call must pass `userUnbounded ? 0 : budget` (not raw budget).
+  assert.match(block, /timeoutMs:\s*userUnbounded\s*\?\s*0\s*:\s*budget/);
+  // The old broken pattern must be gone.
+  assert.equal(block.includes("budget > 0 && budget < FALLBACK_MIN_BUDGET_MS"), false,
+    "the v0.8.7 buggy guard pattern must be removed");
+});
+
+test("v0.8.8 (Gemini Nit + Grok M2 round-9): entry-point guard uses fs.realpathSync", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // The guard must resolve BOTH sides through realpath so symlinks
+  // (plugin cache, npm .bin shims, case-insensitive macOS volumes)
+  // don't cause a legitimate entry to fail-silent.
+  const block = src.slice(
+    src.indexOf("v0.8.7: only auto-run main"),
+    src.indexOf("if (_invokedAs === _entryPath)")
+  );
+  assert.match(block, /fs\.realpathSync\(p\)/, "_entryPath must use realpathSync");
+  assert.match(block, /fs\.realpathSync\(process\.argv\[1\]\)/,
+    "_invokedAs must use realpathSync to handle symlinks");
+});
+
 test("v0.8.7 (Grok L5 round-8): dead startedAt alias removed", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   assert.equal(src.includes("const startedAt = startedAtMs"), false,

@@ -5,6 +5,43 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.8] - 2026-05-15
+
+`/goal` round-9 — 3/3 reviewer consensus on a single CRITICAL bug
+introduced by v0.8.7's own fix, plus a symlink-resolution gap in the
+new entry-point guard.
+
+### Bug fixes
+
+- **3/3 reviewer consensus — exhausted-budget hang risk**.
+  `remainingBudgetMs` returns 0 for BOTH `timeoutMs === 0`
+  (user-unbounded) AND `elapsed >= timeoutMs` (positive-budget
+  overrun). v0.8.7's skip guard was `timeoutMs > 0 && budget > 0 &&
+  budget < FALLBACK_MIN_BUDGET_MS` — the `&& budget > 0` clause let
+  overrun cases (`budget === 0`) fall through to the spawn, which
+  received `timeoutMs: 0` and treated it as unbounded → potential
+  indefinite hang past the user's configured timeout.
+  **Fix**: distinguish via `userUnbounded = timeoutMs === 0` at the
+  call site. Skip guard becomes `!userUnbounded && budget <
+  FALLBACK_MIN_BUDGET_MS` (covers both tiny-positive AND overrun).
+  Spawn call passes `userUnbounded ? 0 : budget` so 0 only reaches
+  the fallback when the user actually asked for unbounded.
+
+- **Gemini Nit + Grok MED #2 — entry-point guard symlink resolution**.
+  v0.8.7's guard compared `path.resolve(process.argv[1])` against
+  `fileURLToPath(import.meta.url)`. The latter is already a realpath;
+  the former isn't. Under a plugin-cache symlink, npm `.bin/` shim,
+  or case-insensitive macOS volume, the comparison falsely failed
+  and `main()` silently didn't run. **Fix**: both sides resolved via
+  `fs.realpathSync` with a fallback to the non-resolved form on
+  ENOENT.
+
+### Tests
+
+- 2 new behavioral tests asserting the corrected guard shape + the
+  realpath resolution.
+- Total suite: 279 passing.
+
 ## [0.8.7] - 2026-05-15
 
 `/goal` round-8 review of v0.8.6: 3/3 consensus on a single CRITICAL

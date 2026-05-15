@@ -1974,12 +1974,15 @@ async function cmdAggregateReview({ flags, positional }) {
         // r.elapsedMs, not the batch wall-clock. Grok HIGH #2 round-8:
         // the v0.8.6 batch wall-clock approach starved fallbacks for
         // fast buggy peers when sibling reviewers were slow.
+        //
+        // v0.8.8 (3/3 round-9 consensus on `budget === 0` ambiguity):
+        // remainingBudgetMs returns 0 for BOTH user-unbounded AND
+        // already-exhausted positive budgets. Distinguish here so an
+        // overrun does NOT pass `timeoutMs: 0` (= unbounded) to the
+        // CLI fallback spawn.
+        const userUnbounded = timeoutMs === 0;
         const budget = remainingBudgetMs(timeoutMs, r.elapsedMs);
-        // budget === 0 means "unbounded" (the timeoutMs === 0 sentinel
-        // path); only skip when there's a positive but tiny budget.
-        // Codex P2 / Gemini Important #1 / Grok HIGH #1 round-8: the
-        // v0.8.6 < 5000 check incorrectly tripped on --timeout 0.
-        if (timeoutMs > 0 && budget > 0 && budget < FALLBACK_MIN_BUDGET_MS) {
+        if (!userUnbounded && budget < FALLBACK_MIN_BUDGET_MS) {
           process.stdout.write(
             `[grok-plugin] ${spec.name}: insufficient remaining timeout ` +
             `budget (${budget}ms < ${FALLBACK_MIN_BUDGET_MS}ms) — keeping peer result.\n\n`
@@ -1993,7 +1996,9 @@ async function cmdAggregateReview({ flags, positional }) {
           promptFile,
           promptText: prompt,
           model: flags.model,
-          timeoutMs: budget,  // 0 means unbounded; passed through
+          // Only 0 (unbounded) reaches the fallback when the user
+          // asked for unbounded; positive budgets are honored exactly.
+          timeoutMs: userUnbounded ? 0 : budget,
           base,
           scope: scope === "auto" ? null : scope,
           adversarial: !!flags.adversarial,
@@ -2147,14 +2152,24 @@ async function main() {
 }
 
 // v0.8.7: only auto-run main() when this file is invoked as the
-// CLI entry point. The v0.8.7 CLI-fallback helper extraction means
-// test files now `import` from companion.mjs to call shouldFallbackToCli
-// / remainingBudgetMs directly. Without this guard, every test-file
-// import would trigger main() with no subcommand → usage error → exit 2,
-// failing the whole test file.
+// CLI entry point. Test files import from companion.mjs to call
+// shouldFallbackToCli / remainingBudgetMs directly; without this
+// guard, every import would trigger main() → usage error → exit 2.
+//
+// v0.8.8 (Gemini Nit + Grok MED #2 round-9): resolve both sides
+// through `fs.realpathSync` so symlinks (e.g. plugin cache symlinks
+// in Claude Code, npm `.bin/` shims, case-insensitive macOS volumes)
+// don't cause the legitimate-entry comparison to falsely fail.
 import { fileURLToPath as _fileURLToPath } from "node:url";
-const _entryPath = _fileURLToPath(import.meta.url);
-const _invokedAs = process.argv[1] ? path.resolve(process.argv[1]) : null;
+const _entryPath = (() => {
+  const p = _fileURLToPath(import.meta.url);
+  try { return fs.realpathSync(p); } catch { return p; }
+})();
+const _invokedAs = (() => {
+  if (!process.argv[1]) return null;
+  try { return fs.realpathSync(process.argv[1]); }
+  catch { return path.resolve(process.argv[1]); }
+})();
 if (_invokedAs === _entryPath) {
   main().catch(err => {
     console.error(`grok-plugin fatal: ${err && err.message ? err.message : err}`);

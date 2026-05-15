@@ -339,6 +339,31 @@ export const BEST_OF_N_MAX = 8;
 
 // v0.8.0: permission_mode values accepted upstream — used by grokBaseArgs
 // when the user-facing `--permission-mode` is supplied.
+// v0.9.12 (Grok LOW + Gemini Important round-12): scan a spawned
+// argv for `--output-format json` in any of its accepted shapes.
+// The v0.9.11 inline scanner only recognized the space-separated
+// form `["--output-format", "json"]` that grokBaseArgs emits today,
+// missing the `--output-format=json` inline form a future caller
+// could legitimately use. Last-wins semantics handle duplicates.
+export function commandUsesJsonOutput(argv) {
+  if (!Array.isArray(argv)) return false;
+  let result = false;
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    if (typeof t !== "string") continue;
+    if (t === "--output-format") {
+      // Next token is the value.
+      result = argv[i + 1] === "json";
+    } else if (t === "--output-format=json") {
+      result = true;
+    } else if (t.startsWith("--output-format=")) {
+      // Different value (--output-format=plain etc.); not json.
+      result = false;
+    }
+  }
+  return result;
+}
+
 export const PERMISSION_MODES = new Set([
   "default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"
 ]);

@@ -14,7 +14,7 @@ import {
   COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS,
   COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS
 } from "../plugins/grok/scripts/lib/args.mjs";
-import { grokBaseArgs } from "../plugins/grok/scripts/lib/grok.mjs";
+import { grokBaseArgs, commandUsesJsonOutput } from "../plugins/grok/scripts/lib/grok.mjs";
 // v0.9.9 (Gemini Nit round-9): moved from dynamic `await import()` to
 // top-level imports for consistency with the rest of this file.
 import { renderJobDetails, formatSessionHint, formatSessionLabel } from "../plugins/grok/scripts/lib/render.mjs";
@@ -248,6 +248,24 @@ test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta
   assert.match(cmdTask, /requested_session_id:\s*flags\["session-id"\]/);
   assert.match(cmdTask, /requested_resume:\s*flags\.resume/);
   assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
+});
+
+test("v0.9.12 (Grok LOW + Gemini Important round-12): commandUsesJsonOutput recognizes all shapes", () => {
+  // Space form (what grokBaseArgs emits today)
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format", "json", "-p", "x"]), true);
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format", "plain", "-p", "x"]), false);
+  // Inline form (a future caller could legitimately use)
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format=json", "-p", "x"]), true);
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format=plain", "-p", "x"]), false);
+  // Missing flag → false (no JSON envelope to trust)
+  assert.equal(commandUsesJsonOutput(["grok", "-p", "x"]), false);
+  // Edge cases
+  assert.equal(commandUsesJsonOutput(null), false);
+  assert.equal(commandUsesJsonOutput([]), false);
+  assert.equal(commandUsesJsonOutput("not an array"), false);
+  // Last-wins semantics: if duplicate flags, last value wins.
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format", "plain", "--output-format", "json"]), true);
+  assert.equal(commandUsesJsonOutput(["grok", "--output-format=json", "--output-format=plain"]), false);
 });
 
 test("v0.9.11 (3/3 round-11): trust flag is derived from spawned argv automatically", () => {

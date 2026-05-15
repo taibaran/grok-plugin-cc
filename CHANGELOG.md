@@ -5,6 +5,34 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-05-15
+
+`/goal` round-12 — **3/3 SHIP**: Codex "no regressions", Gemini
+"solid refinement", Grok **"Recommendation: Ship."** 1 LOW
+(robustness) + 1 Nit (test) actionable.
+
+### Robustness
+
+- **Grok LOW + Gemini Important round-12 — argv scanner only handled space form**.
+  v0.9.11's inline `indexOf("--output-format")` recognized only the
+  two-token shape `["--output-format", "json"]` that `grokBaseArgs`
+  emits today. A future runJob caller using the inline form
+  `--output-format=json` would silently get `trustworthy: false`.
+  **Fix**: extracted `commandUsesJsonOutput(argv)` helper in
+  `lib/grok.mjs` that handles BOTH forms + last-wins semantics for
+  duplicates. runJob now calls it instead of inline scanning.
+
+- **Gemini Nit round-12 — direct test for the derivation logic**.
+  v0.9.11's test only exercised pre-constructed meta objects, not
+  the actual runJob argv→trust derivation. Added 10 assertions on
+  `commandUsesJsonOutput` covering: space form, inline form, missing
+  flag, null/empty argv, last-wins for duplicates of each shape.
+
+### Tests
+
+- 10 new assertions on `commandUsesJsonOutput` (the new helper).
+- Total: 333 passing + 5 integration (skipped).
+
 ## [0.9.11] - 2026-05-15
 
 `/goal` round-11 — **3/3 SHIP**: Codex "no regressions evident", Gemini

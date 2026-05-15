@@ -28,7 +28,7 @@ import {
   detectAuthSource, grokBaseArgs, effectiveModel, DEFAULT_MODEL,
   cleanGrokEnv, probeWithFallback, checkMinVersion, MIN_GROK_VERSION,
   MODEL_FALLBACK_CHAIN, capabilityProbe,
-  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions
+  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions, commandUsesJsonOutput
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal, formatSessionHint } from "./lib/render.mjs";
@@ -597,16 +597,15 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         meta.exit_code = code;
         if (parsedOut.kind === "text" && parsedOut.sessionId) {
           meta.session_id = parsedOut.sessionId;
-          // v0.9.11 (Gemini Important + Grok LOW round-11): derive trust
-          // from the actual `--output-format json` flag in the spawned
-          // argv, NOT from a manually-set meta field. This eliminates
-          // the "command forgot to set envelope_json" footgun for any
-          // future runJob caller. The grok invocation either passed
-          // `--output-format json` or it didn't; we can read that
-          // directly from `meta.command` (set by buildJobMeta).
-          const argv = Array.isArray(meta.command) ? meta.command : [];
-          const ofIdx = argv.indexOf("--output-format");
-          meta.session_id_trustworthy = ofIdx >= 0 && argv[ofIdx + 1] === "json";
+          // v0.9.12 (Grok LOW + Gemini Important round-12): use the
+          // shared `commandUsesJsonOutput` helper from lib/grok.mjs.
+          // It recognizes BOTH `--output-format json` (space form,
+          // what grokBaseArgs emits today) AND `--output-format=json`
+          // (inline form a future caller could use). Last-wins
+          // semantics across duplicate flags. The v0.9.11 inline
+          // scanner only handled the space form and would have
+          // silently suppressed trust for any caller using inline.
+          meta.session_id_trustworthy = commandUsesJsonOutput(meta.command);
         }
         meta.ended_at = new Date().toISOString();
         writeJobMeta(meta.id, meta);

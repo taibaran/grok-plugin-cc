@@ -268,6 +268,50 @@ test("v0.9.12 (Grok LOW + Gemini Important round-12): commandUsesJsonOutput reco
   assert.equal(commandUsesJsonOutput(["grok", "--output-format=json", "--output-format=plain"]), false);
 });
 
+test("v0.9.13 (Grok Medium round-13): value-token consumption prevents inline-pattern misparse", () => {
+  // The space form must consume its value token so a value that resembles
+  // an inline flag (e.g. literal "--output-format=json" passed as the value
+  // to a prior space-form flag) is not re-interpreted as a later inline flag.
+  // Semantically argv ["--output-format", "--output-format=json"] sets the
+  // output-format VALUE to the literal string "--output-format=json", which
+  // is not "json", so the helper must return false.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format", "--output-format=json"]),
+    false,
+  );
+  // Same shape with a benign tail flag — still false because the only
+  // --output-format VALUE is the literal "--output-format=json" string.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format", "--output-format=json", "-p", "x"]),
+    false,
+  );
+  // Inverse: value is "--output-format=plain" → not "json" → false.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format", "--output-format=plain"]),
+    false,
+  );
+  // Mixed-form last-wins: space json (consumed), then inline plain wins.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format", "json", "--output-format=plain"]),
+    false,
+  );
+  // Mixed-form last-wins inverse: inline plain, then space json wins.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format=plain", "--output-format", "json"]),
+    true,
+  );
+  // Mixed-form last-wins inverse 2: inline json, then space plain wins.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format=json", "--output-format", "plain"]),
+    false,
+  );
+  // Mixed-form last-wins: space plain, then inline json wins.
+  assert.equal(
+    commandUsesJsonOutput(["grok", "--output-format", "plain", "--output-format=json"]),
+    true,
+  );
+});
+
 test("v0.9.11 (3/3 round-11): trust flag is derived from spawned argv automatically", () => {
   // v0.9.11 deleted the manual envelope_json field. The trust flag is
   // now computed by runJob from the actual `--output-format json` flag

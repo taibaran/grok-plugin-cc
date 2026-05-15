@@ -5,6 +5,46 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-05-15
+
+`/goal` round-13 — **Gemini SHIP** ("No material regressions"), Codex
+P2 ("scanner needs to distinguish actual option positions from values
+of other options"), Grok **Medium** ("argv scanner consumes value
+token of the space form but does not advance past it"). Both findings
+point at the same robustness gap. Fixed here.
+
+### Robustness
+
+- **Grok Medium + Codex P2 round-13 — value-token re-interpretation in
+  `commandUsesJsonOutput`**.
+  The v0.9.12 helper scanned every argv token independently. After
+  recognising the space form `--output-format <val>` it peeked at
+  `argv[i+1]` for the value but did not advance `i`. A value that
+  happened to match an inline pattern (e.g. the literal string
+  `--output-format=json` passed by some future caller as the VALUE of
+  the space-form flag) would then be re-scanned on the next iteration
+  and flip `result` to `true`, even though semantically the
+  output-format value was the literal `"--output-format=json"` string
+  (not `"json"`). Not exploitable today because every existing call
+  site of `grokBaseArgs` only emits `"json"` or `"plain"` as the
+  value, but a real robustness gap in a helper meant to be a robust
+  last-wins parser for any future caller.
+  **Fix**: consume the value token when the space form is seen (`i++`
+  if the value is a string), so its contents are never re-scanned as a
+  candidate flag.
+
+### Tests
+
+- 7 new assertions on `commandUsesJsonOutput` covering:
+  - Space-form value that resembles the inline pattern (the exact
+    Grok-Medium scenario).
+  - Same with a benign tail flag.
+  - Space-form value that resembles the inline pattern with a
+    non-json suffix.
+  - Mixed-form last-wins, both directions (space→inline,
+    inline→space), with both `json` and `plain` as the winning value.
+- Total: 339 tests (334 passing + 5 integration skipped).
+
 ## [0.9.12] - 2026-05-15
 
 `/goal` round-12 — **3/3 SHIP**: Codex "no regressions", Gemini

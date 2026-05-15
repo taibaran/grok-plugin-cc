@@ -345,6 +345,12 @@ export const BEST_OF_N_MAX = 8;
 // form `["--output-format", "json"]` that grokBaseArgs emits today,
 // missing the `--output-format=json` inline form a future caller
 // could legitimately use. Last-wins semantics handle duplicates.
+// v0.9.13 (Grok Medium round-13): the v0.9.12 scanner peeked at
+// argv[i+1] for the space form but did not advance past it. A value
+// token that happened to match `--output-format=...` (e.g. the
+// literal value passed via space form) would then be re-interpreted
+// as an inline flag on the next iteration, flipping the verdict.
+// Consume the value token so its contents are never re-scanned.
 export function commandUsesJsonOutput(argv) {
   if (!Array.isArray(argv)) return false;
   let result = false;
@@ -352,8 +358,12 @@ export function commandUsesJsonOutput(argv) {
     const t = argv[i];
     if (typeof t !== "string") continue;
     if (t === "--output-format") {
-      // Next token is the value.
-      result = argv[i + 1] === "json";
+      // Next token is the value — consume it so a value that resembles
+      // an inline flag (e.g. "--output-format=json") cannot flip the
+      // result on the next iteration.
+      const val = argv[i + 1];
+      result = val === "json";
+      if (typeof val === "string") i++;
     } else if (t === "--output-format=json") {
       result = true;
     } else if (t.startsWith("--output-format=")) {

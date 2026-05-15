@@ -13,10 +13,24 @@ export function isAlive(pid) {
   if (!isValidPid(pid)) return false;
   try { process.kill(pid, 0); return true; }
   catch (e) {
-    // EPERM means a process exists but we cannot signal it (different uid).
-    // For liveness purposes that is "alive" — returning false here would
-    // cause session-lifecycle-hook to reap a job owned by another user.
-    if (e && e.code === "EPERM") return true;
+    // EPERM means *some* process exists at this PID but we cannot signal
+    // it. In the plugin's case the only way EPERM can happen is PID reuse
+    // (e.g. our originally-spawned grok exited and the kernel handed the
+    // PID to a daemon from another user). The old behavior returned true
+    // here so SessionStart wouldn't reap a job "still owned by another
+    // user" — but in our threat model that case is nonsensical because we
+    // always spawn as our own UID. Returning true under genuine PID reuse
+    // caused state accumulation: pruneJobs thought the job was alive,
+    // terminateProcessTree could not actually kill the (foreign) process,
+    // and the metadata sat in jobs/ forever.
+    //
+    // New behavior: treat EPERM as "not our process anymore" and return
+    // false. The close handler still corrects the record if our real
+    // process happens to be the one returning EPERM (which is the
+    // theoretical race that motivated the old code) — meta.status gets
+    // overwritten by the close event regardless of what isAlive returned
+    // in the meantime.
+    if (e && e.code === "EPERM") return false;
     return false;
   }
 }

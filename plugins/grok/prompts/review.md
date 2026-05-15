@@ -21,10 +21,14 @@ If the user supplied a focus area, weight it heavily, but still report any other
 </review_method>
 
 <finding_bar>
-Report only material findings. Group by severity:
-- **Critical** — ship-blocking (security, data loss, broken main flow)
-- **Important** — should-fix (regressions, edge-case bugs)
-- **Nit** — style, naming, minor cleanup
+Report only material findings. Use exactly these severity levels (lowercase
+in JSON output to match the schema):
+- **critical** — ship-blocking: security, data loss, broken main flow.
+- **high** — should-fix-before-merge: real regressions, edge-case bugs,
+  reliability gaps that bite in production.
+- **medium** — should-fix-soon: incorrect-but-bounded, narrow logic
+  errors, missing input validation that is not immediately exploitable.
+- **low** — nice-to-fix: minor cleanup, naming, style, code-smell.
 
 Each finding should answer:
 1. What is wrong?

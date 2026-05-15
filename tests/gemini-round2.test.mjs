@@ -79,17 +79,19 @@ test("readBoundedStdout reads the TAIL of files larger than the cap (Gemini find
 });
 
 test("parseGrokJsonEnvelope picks the LAST balanced JSON object", () => {
-  // Source-level assertion: the function must scan for ALL balanced
-  // objects and return the last. The current implementation uses
-  // findBalancedJsonEnd + a left-to-right scan with `last = parsed`.
+  // Source-level assertion: the function must use the shared
+  // `findLastJsonObject` helper (from lib/verdict.mjs) as its slow path,
+  // after a fast JSON.parse on the whole blob. The "last balanced object"
+  // semantics live in findLastJsonObject itself; this test pins that the
+  // hook uses the shared helper rather than reimplementing the scan.
   const src = fs.readFileSync(STOP_GATE_PATH, "utf8");
   assert.match(src, /function parseGrokJsonEnvelope\(/);
   const start = src.indexOf("function parseGrokJsonEnvelope(");
   const slice = src.slice(start, start + 2500);
-  // The scan loop must use findBalancedJsonEnd.
-  assert.match(slice, /findBalancedJsonEnd/);
-  // And track the LAST parsed object (not return on first).
-  assert.match(slice, /last\s*=\s*parsed/);
+  // Must call the shared helper.
+  assert.match(slice, /findLastJsonObject\(/);
+  // And the import must be present at the top of the file.
+  assert.match(src, /import\s*\{[^}]*findLastJsonObject[^}]*\}\s*from\s*"\.\/lib\/verdict\.mjs"/);
 });
 
 // End-to-end against a real on-disk tail. We can't easily exercise

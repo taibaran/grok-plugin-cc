@@ -47,15 +47,19 @@ export function captureDiff({ scope, base, cwd } = {}) {
     // it apart from a clean branch.
     const verify = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8", cwd });
     if (verify.status !== 0) return { kind: "bad-ref", diff: "", base: ref };
-    // `--` separates options from refspecs so a ref that somehow slipped past
-    // our regex still can't be parsed as an option.
-    const r = spawnSync("git", ["diff", "--", `${ref}...HEAD`], { encoding: "utf8", cwd });
-    // Some versions of git diff don't accept `--` before a refspec. Fall back
-    // to plain form if the validated ref-only form failed.
-    const out = r.status === 0
-      ? (r.stdout || "")
-      : (spawnSync("git", ["diff", `${ref}...HEAD`], { encoding: "utf8", cwd }).stdout || "");
-    return { kind: "branch", diff: truncateDiff(out), base: ref };
+    // Refspec is passed WITHOUT a preceding `--`. The earlier
+    // `git diff -- <ref>...HEAD` form is wrong: `--` tells git
+    // "everything after this is pathspec", so the refspec was being
+    // interpreted as a path. The command then exited 0 with empty stdout
+    // (no matching paths) and the fallback never fired, producing a
+    // silent "nothing to review" for any branch comparison.
+    //
+    // The refspec is safe to pass directly because `isValidGitRef`
+    // rejects anything starting with `-`, anything with whitespace, and
+    // anything outside the [a-zA-Z0-9_./@^~-] character class — git
+    // cannot mistake it for a flag.
+    const r = spawnSync("git", ["diff", `${ref}...HEAD`], { encoding: "utf8", cwd });
+    return { kind: "branch", diff: truncateDiff(r.stdout || ""), base: ref };
   }
   if (scope === "staged") {
     const r = spawnSync("git", ["diff", "--cached"], { encoding: "utf8", cwd });

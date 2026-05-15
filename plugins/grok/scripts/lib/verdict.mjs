@@ -1,6 +1,13 @@
-// Stop-gate verdict parser. Extracted as a module so the unit tests can
-// import the production implementation directly instead of maintaining a
-// shadow copy that drifts silently from the hook script.
+// Stop-gate verdict parser + shared JSON-extraction helpers.
+//
+// Extracted to its own module so unit tests can import production
+// implementations directly (no shadow copies), and so companion.mjs +
+// stop-review-gate-hook.mjs share one robust last-balanced-object scanner
+// instead of each carrying its own slightly-different version. The two
+// previous parsers (parseGrokJson, parseGrokJsonEnvelope) handled noisy
+// output inconsistently — companion's only tried JSON.parse on the full
+// blob and silently fell through to "unknown", while the stop-gate's
+// scanned for the last balanced object. They now share findLastJsonObject.
 
 // Find the end-index of the first balanced JSON object starting at `start`,
 // taking string boundaries into account. Without string-awareness, a `}`
@@ -62,6 +69,37 @@ export function parseVerdict(raw) {
     if (verdict) return verdict;
   }
   return null;
+}
+
+// Walk a string left-to-right and collect ALL balanced JSON objects that
+// parse cleanly. Return the LAST one (or null if none parsed).
+//
+// Used by:
+//   - companion.mjs::parseGrokJson — Grok's `--output-format json`
+//     envelope ({text, sessionId, ...} or {type: "error", message}).
+//     The envelope is by contract the FINAL object Grok emits; any
+//     preceding noise (tracing, partial JSON from a tail-read) is
+//     discarded.
+//   - stop-review-gate-hook.mjs::parseGrokJsonEnvelope — same shape,
+//     same contract, but reading the stdout TAIL where the envelope is
+//     guaranteed to be the last balanced object.
+//
+// The shared helper means a future refactor to one site can't silently
+// drift from the other.
+export function findLastJsonObject(s) {
+  if (typeof s !== "string" || !s) return null;
+  let last = null;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "{") continue;
+    const end = findBalancedJsonEnd(s, i);
+    if (end < 0) continue;
+    try {
+      const parsed = JSON.parse(s.slice(i, end + 1));
+      if (parsed && typeof parsed === "object") last = parsed;
+    } catch {}
+    i = end;
+  }
+  return last;
 }
 
 // Walk a string left-to-right collecting all balanced JSON objects that

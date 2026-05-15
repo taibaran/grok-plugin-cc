@@ -26,6 +26,7 @@ import {
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal } from "./lib/render.mjs";
+import { findLastJsonObject } from "./lib/verdict.mjs";
 
 // Conservative timeouts. Override with `--timeout <duration>`, or pass
 // `--timeout 0` to disable. Task has no default — rescue work is open-ended
@@ -116,6 +117,56 @@ function writePromptToTempFile(prompt) {
 
 function safeUnlink(p) {
   try { fs.unlinkSync(p); } catch {}
+}
+
+// Bounded file read for /grok:result. Reads up to `maxBytes` from the
+// START of the file (vs the stop-gate's tail-read, which is targeting the
+// final JSON envelope). For result display we WANT the early bytes —
+// that's where the user's textual response will be. Returns the string,
+// or null if the file cannot be read (refusal is communicated to the
+// caller, not surfaced as an exception).
+function readBoundedFile(filePath, maxBytes) {
+  let stat;
+  try { stat = fs.statSync(filePath); }
+  catch { return null; }
+  if (!stat.isFile()) return null;
+  const size = Math.min(stat.size, maxBytes);
+  if (size === 0) return "";
+  const buf = Buffer.alloc(size);
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    fs.readSync(fd, buf, 0, size, 0);
+  } catch { return null; }
+  finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+  const text = buf.toString("utf8");
+  // If we truncated, add a marker line so the user knows the display is
+  // partial. The on-disk file is still complete.
+  if (stat.size > maxBytes) {
+    return text + `\n\n[... output truncated by grok-plugin: ${stat.size - maxBytes} bytes omitted; full output remains at ${filePath}]\n`;
+  }
+  return text;
+}
+
+// Validate that a path Grok claimed to write (an image / video output)
+// is safe to print to the user's terminal as part of an `open "<path>"`
+// hint. Without this check, a malicious model that returned a markdown
+// link like `![alt]("; rm -rf ~; #)` would cause the plugin to display
+// `open ""; rm -rf ~; #"` to the user — a copy-paste command-injection
+// trap.
+//
+// Defense: refuse any path that contains shell metacharacters or
+// whitespace. The legitimate output of `/imagine` is an absolute path
+// under `~/.grok/sessions/.../images/<n>.<ext>` — those paths contain
+// only `/`, alphanumerics, dashes, dots, and underscores. Anything else
+// is rejected.
+const SAFE_MEDIA_PATH_PATTERN = /^[A-Za-z0-9._\/\-%@+]+$/;
+function isSafeMediaPath(p) {
+  return typeof p === "string" && p.length > 0 && p.length < 4096 && SAFE_MEDIA_PATH_PATTERN.test(p);
 }
 
 // ---------- subcommand: setup ----------
@@ -247,32 +298,43 @@ function cmdSetup({ flags }) {
 // Returns { kind: "text" | "error" | "unknown", text, message, sessionId } where
 // unknown means the payload could not be parsed as either shape.
 //
-// We strip ANSI / OSC / DCS / C0 controls before parsing. Grok normally
-// emits clean JSON on stdout, but its Rust tracing layer can leak colored
-// log lines under certain conditions (e.g. TERM=xterm-256color while
-// emitting json). JSON.parse throws on any non-JSON prefix, so a single
-// stray escape sequence would silently flip an error envelope to "unknown"
-// — which the close handler then treats as a generic exit-0 success.
+// Two defense layers, matching stop-review-gate-hook.mjs's parser:
+//   1. Strip ANSI / OSC / DCS / C0 controls (`sanitizeForTerminal`) — Grok
+//      normally emits clean JSON on stdout, but its Rust tracing layer can
+//      leak colored log lines that would otherwise break JSON.parse.
+//   2. If the whole blob doesn't parse, fall back to scanning for the
+//      LAST balanced JSON object (`findLastJsonObject` from verdict.mjs).
+//      Grok's envelope is by contract the final JSON emitted, so the
+//      last-object scan handles streamed `thought` text, tracing prefixes,
+//      and any other noise that could trail or precede the envelope.
+//      Previously this fallback existed only in the stop-gate hook; ask
+//      and review used the strict whole-blob parse, so a single stray
+//      escape between the envelope and EOF silently flipped errors to
+//      "unknown" and exit-0-with-error envelopes to "completed".
 function parseGrokJson(raw) {
   if (!raw) return { kind: "unknown" };
   const clean = sanitizeForTerminal(raw).trim();
   if (!clean) return { kind: "unknown" };
-  try {
-    const parsed = JSON.parse(clean);
-    if (parsed && typeof parsed === "object") {
-      if (parsed.type === "error") {
-        return { kind: "error", message: parsed.message || "" };
-      }
-      if (typeof parsed.text === "string") {
-        return {
-          kind: "text",
-          text: parsed.text,
-          sessionId: parsed.sessionId || null,
-          stopReason: parsed.stopReason || null
-        };
-      }
-    }
-  } catch {}
+  // Fast path: the common case is the whole blob IS the envelope.
+  let parsed = null;
+  try { parsed = JSON.parse(clean); } catch {}
+  if (!parsed || typeof parsed !== "object") {
+    // Slow path: scan for the last balanced object. Catches noisy prefixes
+    // and trailing junk.
+    parsed = findLastJsonObject(clean);
+  }
+  if (!parsed || typeof parsed !== "object") return { kind: "unknown" };
+  if (parsed.type === "error") {
+    return { kind: "error", message: parsed.message || "" };
+  }
+  if (typeof parsed.text === "string") {
+    return {
+      kind: "text",
+      text: parsed.text,
+      sessionId: parsed.sessionId || null,
+      stopReason: parsed.stopReason || null
+    };
+  }
   return { kind: "unknown" };
 }
 
@@ -341,6 +403,15 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
       detached: true,
       env: cleanGrokEnv()
     });
+    // Tell Node to UTF-8-decode the child's stdio streams BEFORE the data
+    // handlers see chunks. Without this, multi-byte sequences that split
+    // across chunk boundaries decode to U+FFFD replacement characters and
+    // can silently corrupt the JSON envelope or, worse, the user-visible
+    // streamed output. Node uses an internal StringDecoder when you call
+    // setEncoding, so multi-byte sequences are buffered and emitted only
+    // when complete.
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
     meta.pid = proc.pid;
     if (timeoutMs > 0) meta.timeout_ms = timeoutMs;
     writeJobMeta(meta.id, meta);
@@ -363,19 +434,25 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
     }
 
     proc.stdout.on("data", d => {
+      // setEncoding("utf8") above means `d` is already a UTF-8-safe
+      // string (decoded with an internal StringDecoder that buffers
+      // incomplete sequences across chunks). We still need to write to
+      // disk — fs.writeSync accepts strings and writes them as utf8 by
+      // default, so the on-disk log stays byte-accurate.
       fs.writeSync(stdoutFd, d);
       if (showStdout) {
         const safe = sanitizer.push(d);
         if (safe) process.stdout.write(safe);
       }
       if (outBuf.length < MAX_JOB_BUF) {
-        outBuf += d.toString().slice(0, MAX_JOB_BUF - outBuf.length);
+        outBuf += d.slice(0, MAX_JOB_BUF - outBuf.length);
       }
     });
     proc.stderr.on("data", d => {
+      // Same setEncoding contract — `d` is a string.
       fs.writeSync(stderrFd, d);
       if (errBuf.length < MAX_JOB_BUF) {
-        errBuf += d.toString().slice(0, MAX_JOB_BUF - errBuf.length);
+        errBuf += d.slice(0, MAX_JOB_BUF - errBuf.length);
       }
     });
 
@@ -476,15 +553,85 @@ function buildJobMeta({ kind, args, task_text, extra = {} }) {
 
 // ---------- subcommand: review / adversarial-review ----------
 
-function validateReviewSchemaShallow(obj) {
+// Severity levels allowed by schemas/review-output.schema.json. Kept in sync
+// with the schema by hand because we want to fail loudly here without
+// pulling in an AJV dependency.
+const SCHEMA_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+
+// Hard caps on individual schema fields. A misbehaving Grok could return a
+// 5 MiB `summary` or `next_steps[]` entry — rendering that to the user's
+// terminal would lock it up. Caps are generous enough for any reasonable
+// review (each finding's body can be ~64 KiB).
+const SCHEMA_MAX_STRING_BYTES = 64 * 1024;
+const SCHEMA_MAX_ARRAY_LEN = 256;
+
+function checkBoundedString(value, label) {
+  if (typeof value !== "string") return `${label} is not a string`;
+  if (Buffer.byteLength(value, "utf8") > SCHEMA_MAX_STRING_BYTES) {
+    return `${label} exceeds ${SCHEMA_MAX_STRING_BYTES} bytes`;
+  }
+  return null;
+}
+
+// Validate a parsed review object against schemas/review-output.schema.json.
+// Returns null on success, a human-readable error message on failure.
+// Replaces the previous "shallow" check (which only validated top-level
+// keys + verdict enum). The strict version enforces:
+//   - top-level shape (verdict / summary / findings / next_steps)
+//   - severity enum on every finding (matches schema)
+//   - bounded string lengths so a runaway model can't break the terminal
+//   - bounded array lengths on findings and next_steps
+//   - each finding has the required fields, with the right types
+function validateReviewSchema(obj) {
   if (!obj || typeof obj !== "object") return "not an object";
   for (const key of ["verdict", "summary", "findings", "next_steps"]) {
     if (!(key in obj)) return `missing required key: ${key}`;
   }
   if (!["approve", "needs-attention"].includes(obj.verdict)) return `bad verdict: ${obj.verdict}`;
+  const summaryErr = checkBoundedString(obj.summary, "summary");
+  if (summaryErr) return summaryErr;
   if (!Array.isArray(obj.findings)) return "findings is not an array";
+  if (obj.findings.length > SCHEMA_MAX_ARRAY_LEN) {
+    return `findings has ${obj.findings.length} entries (max ${SCHEMA_MAX_ARRAY_LEN})`;
+  }
+  for (let i = 0; i < obj.findings.length; i++) {
+    const f = obj.findings[i];
+    if (!f || typeof f !== "object") return `findings[${i}] is not an object`;
+    for (const key of ["severity", "title", "body", "file", "line_start", "line_end", "confidence", "recommendation"]) {
+      if (!(key in f)) return `findings[${i}] missing key: ${key}`;
+    }
+    if (!SCHEMA_SEVERITIES.has(f.severity)) {
+      return `findings[${i}] has invalid severity: ${f.severity} (allowed: ${[...SCHEMA_SEVERITIES].join(", ")})`;
+    }
+    for (const strField of ["title", "body", "file", "recommendation"]) {
+      const err = checkBoundedString(f[strField], `findings[${i}].${strField}`);
+      if (err) return err;
+    }
+    if (!Number.isInteger(f.line_start) || f.line_start < 1) {
+      return `findings[${i}].line_start must be a positive integer`;
+    }
+    if (!Number.isInteger(f.line_end) || f.line_end < 1) {
+      return `findings[${i}].line_end must be a positive integer`;
+    }
+    if (typeof f.confidence !== "number" || f.confidence < 0 || f.confidence > 1) {
+      return `findings[${i}].confidence must be a number in [0, 1]`;
+    }
+  }
+  if (!Array.isArray(obj.next_steps)) return "next_steps is not an array";
+  if (obj.next_steps.length > SCHEMA_MAX_ARRAY_LEN) {
+    return `next_steps has ${obj.next_steps.length} entries (max ${SCHEMA_MAX_ARRAY_LEN})`;
+  }
+  for (let i = 0; i < obj.next_steps.length; i++) {
+    const err = checkBoundedString(obj.next_steps[i], `next_steps[${i}]`);
+    if (err) return err;
+  }
   return null;
 }
+
+// Backward-compatible alias. The old name was "Shallow" but we now do a
+// full strict pass; kept exporting under the old call site name so the
+// rest of the file doesn't need rewriting.
+const validateReviewSchemaShallow = validateReviewSchema;
 
 async function cmdReview({ flags, positional }, { adversarial }) {
   if (!which("grok")) {
@@ -709,7 +856,18 @@ async function cmdImagine({ flags, positional }, { video }) {
   if (mediaPath) {
     const noun = video ? "Video" : "Image";
     process.stdout.write(`${noun}: ${mediaPath}\n`);
-    process.stdout.write(`\nOpen with:\n  open "${mediaPath}"\n`);
+    // The `open "<path>"` hint is a copy-paste-into-shell convenience.
+    // If Grok returned a path with shell metacharacters (a content-policy
+    // bypass, a tampered upstream, or an attacker-influenced description)
+    // a naive `open "${mediaPath}"` template would let the user
+    // copy-paste a command-injection payload. Validate before
+    // suggesting. If the path looks unsafe, just print it (the user can
+    // still inspect or open it manually).
+    if (isSafeMediaPath(mediaPath)) {
+      process.stdout.write(`\nOpen with:\n  open "${mediaPath}"\n`);
+    } else {
+      process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
+    }
     if (parsed.sessionId) {
       process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: grok -r ${parsed.sessionId})\n`);
     }
@@ -860,8 +1018,13 @@ function cmdResult({ positional }) {
   if (!safeOut) {
     console.log("(stdout path is outside the jobs directory - refusing to read)");
   } else {
-    try {
-      const raw = fs.readFileSync(safeOut, "utf8");
+    // Bound the read at MAX_REVIEW_JSON_BYTES so a runaway job that
+    // wrote multi-GB stdout can't OOM /grok:result. The on-disk file
+    // remains uncapped for forensic use.
+    const raw = readBoundedFile(safeOut, MAX_REVIEW_JSON_BYTES);
+    if (raw === null) {
+      console.log(`(could not read stdout)`);
+    } else {
       // If the captured output was JSON, render the inner text; otherwise raw.
       const parsed = parseGrokJson(raw);
       if (parsed.kind === "text") {
@@ -871,18 +1034,18 @@ function cmdResult({ positional }) {
       } else {
         process.stdout.write(sanitizeForTerminal(raw || "(no output)\n"));
       }
-    } catch (e) {
-      console.log(`(could not read stdout: ${e.message})`);
     }
   }
   if (meta.exit_code && meta.exit_code !== 0) {
     console.log("\n## Errors\n");
     const safeErr = safeJobLogPath(meta.stderr_path);
     if (safeErr) {
-      try {
-        const err = fs.readFileSync(safeErr, "utf8");
-        process.stdout.write(sanitizeForTerminal(err));
-      } catch {}
+      // Same bound applies to stderr — a misbehaving Grok could fill
+      // either stream.
+      const errRaw = readBoundedFile(safeErr, MAX_REVIEW_JSON_BYTES);
+      if (errRaw !== null) {
+        process.stdout.write(sanitizeForTerminal(errRaw));
+      }
     }
   }
   console.log(`\n---\nFollow-up: /grok:status ${meta.id}`);

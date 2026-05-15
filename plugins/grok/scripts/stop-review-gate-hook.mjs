@@ -24,7 +24,7 @@ import { readConfig } from "./lib/state.mjs";
 import { which, classifyAuthBlob, grokBaseArgs, cleanGrokEnv } from "./lib/grok.mjs";
 import { captureDiff } from "./lib/git.mjs";
 import { buildStopGatePrompt } from "./lib/prompts.mjs";
-import { parseVerdict, findBalancedJsonEnd } from "./lib/verdict.mjs";
+import { parseVerdict, findLastJsonObject } from "./lib/verdict.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { sanitizeForTerminal } from "./lib/render.mjs";
 
@@ -109,42 +109,19 @@ function safeUnlink(p) {
 // Extract Grok's `--output-format json` envelope from raw stdout.
 //
 // Two layers of defense:
-//   1. ANSI / OSC / DCS / C0 stripping (`sanitizeForTerminal`). Grok can
-//      leak colored tracing lines into stdout under some terminal
-//      configurations; JSON.parse rejects any non-JSON prefix, and a
-//      silent parse failure flips the gate to fail-open ("allow").
-//   2. LAST-balanced-object extraction. We do NOT call `JSON.parse(clean)`
-//      on the whole blob — Grok's stdout often contains streaming `thought`
-//      text BEFORE the final envelope, and (after the v0.3.0 round-2 fix
-//      to `readBoundedStdout`) we may even be looking at a tail that starts
-//      mid-string. The envelope is by contract the FINAL JSON object Grok
-//      emits, so we scan for ALL balanced JSON objects and return the
-//      last one that parses cleanly. This defends against:
-//        - prefix noise (tracing lines, thought streams)
-//        - mid-string starts (tail reads)
-//        - any model-emitted-JSON-before-the-final-envelope
+//   1. ANSI / OSC / DCS / C0 stripping (`sanitizeForTerminal`).
+//   2. LAST-balanced-object extraction via the shared `findLastJsonObject`
+//      helper in lib/verdict.mjs. Shared with companion.mjs::parseGrokJson
+//      so the two parsers cannot drift over time.
 function parseGrokJsonEnvelope(raw) {
   if (!raw) return null;
   const clean = sanitizeForTerminal(raw).trim();
   if (!clean) return null;
-  // Fast path: the common case is the whole blob IS the envelope, no noise.
   try {
     const parsed = JSON.parse(clean);
     if (parsed && typeof parsed === "object") return parsed;
   } catch {}
-  // Slow path: scan for the last balanced JSON object in the cleaned blob.
-  let last = null;
-  for (let i = 0; i < clean.length; i++) {
-    if (clean[i] !== "{") continue;
-    const end = findBalancedJsonEnd(clean, i);
-    if (end < 0) continue;
-    try {
-      const parsed = JSON.parse(clean.slice(i, end + 1));
-      if (parsed && typeof parsed === "object") last = parsed;
-    } catch {}
-    i = end;
-  }
-  return last;
+  return findLastJsonObject(clean);
 }
 
 // Same temp-file pattern as the prompt file. The grok stdout could be
@@ -282,13 +259,23 @@ function main() {
     cwd,
     env: cleanGrokEnv()
   });
+  // UTF-8 decode at the stream layer so multi-byte sequences that split
+  // across chunk boundaries don't decode to U+FFFD and silently break the
+  // JSON envelope parse. Node uses an internal StringDecoder when
+  // setEncoding is called, buffering incomplete sequences across data
+  // events. Mirrors companion.mjs::runJob.
+  proc.stdout.setEncoding("utf8");
+  proc.stderr.setEncoding("utf8");
 
   proc.stdout.on("data", d => {
+    // `d` is now a UTF-8-safe string. fs.writeSync of a string writes
+    // it as utf8 by default — the on-disk log stays byte-accurate.
     try { fs.writeSync(stdoutFd, d); } catch {}
   });
   proc.stderr.on("data", d => {
     if (errBuf.length < MAX_GATE_STDERR_BUF) {
-      errBuf += d.toString().slice(0, MAX_GATE_STDERR_BUF - errBuf.length);
+      // `d` is already a string per setEncoding — no toString needed.
+      errBuf += d.slice(0, MAX_GATE_STDERR_BUF - errBuf.length);
     }
   });
 

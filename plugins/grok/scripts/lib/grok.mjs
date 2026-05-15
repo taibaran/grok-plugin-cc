@@ -243,6 +243,25 @@ export function detectAuthSource() {
   return "browser OAuth (~/.grok/auth.json)";
 }
 
+// Tools to disallow for read-only operations (ask, review,
+// adversarial-review). Strips write + shell capabilities but deliberately
+// leaves web_search / web_fetch / Agent intact so Grok can ground reviews
+// in current docs or X discourse — that is Grok's primary differentiator
+// against Claude's knowledge cutoff.
+//
+// These tool IDs come from the README's "Tool Filtering" section, not
+// display names.
+export const READ_ONLY_DISALLOWED_TOOLS = "search_replace,run_terminal_cmd,todo_write";
+
+// Tools to disallow during the auth probe. The probe sends a trivial "say
+// OK" prompt — it has no business calling ANY tool, so we ban the full
+// set (including Agent / web_*) to keep the probe cheap, deterministic,
+// and fast. Using a separate constant from READ_ONLY_DISALLOWED_TOOLS
+// makes the difference between "real work, read-only" and "minimal liveness
+// check" explicit in the code, addressing Codex's "inconsistent policy"
+// finding.
+export const AUTH_PROBE_DISALLOWED_TOOLS = "Agent,run_terminal_cmd,search_replace,web_search,web_fetch,todo_write";
+
 // Build the base argument vector for a non-interactive `grok -p` invocation.
 //
 //   readOnly=true  → --permission-mode plan AND strip write/shell tools.
@@ -269,10 +288,7 @@ export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessi
   ];
   if (readOnly) {
     args.push("--permission-mode", "plan");
-    // Belt-and-suspenders: even if plan mode misbehaves, the agent has no
-    // write or shell tools to call. Note these are tool IDs from the
-    // README's "Tool Filtering" table, not display names.
-    args.push("--disallowed-tools", "search_replace,run_terminal_cmd,todo_write");
+    args.push("--disallowed-tools", READ_ONLY_DISALLOWED_TOOLS);
   } else {
     args.push("--yolo");
   }
@@ -284,6 +300,10 @@ export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessi
 // checks both the exit code and the response body. `--max-turns 5` is generous
 // enough to absorb Grok's internal thinking turns (the live CLI uses ~4 internal
 // messages even for "say OK") while still catching a hung session.
+//
+// Tool list uses the broader AUTH_PROBE_DISALLOWED_TOOLS (vs the per-call
+// READ_ONLY_DISALLOWED_TOOLS used by ask/review). The probe doesn't need web
+// search / subagents / etc., so banning the full set keeps it deterministic.
 export function authProbe(model) {
   const r = spawnSync(
     "grok",
@@ -293,7 +313,7 @@ export function authProbe(model) {
       "-m", model || effectiveModel(),
       "--max-turns", "5",
       "--permission-mode", "plan",
-      "--disallowed-tools", "Agent,run_terminal_cmd,search_replace,web_search,web_fetch,todo_write"
+      "--disallowed-tools", AUTH_PROBE_DISALLOWED_TOOLS
     ],
     { encoding: "utf8", timeout: AUTH_PROBE_TIMEOUT_MS, env: cleanGrokEnv() }
   );

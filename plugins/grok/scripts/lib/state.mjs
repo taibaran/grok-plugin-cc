@@ -107,7 +107,17 @@ function isOwnedDirectoryChain(dirPath) {
     try { st = fs.lstatSync(cur); }
     catch { return false; }
     if (!st.isDirectory()) return false;        // symlink or non-dir → reject
-    if (st.uid !== myUid) return true;           // reached a parent we don't own — fine, stop here
+    if (st.uid !== myUid) {
+      // Gemini round-10 finding: an attacker can pre-create an
+      // intermediate directory like `/tmp/grok-plugin-cc` under THEIR
+      // UID with mode 0777 in shared /tmp. The old code stopped at
+      // any non-self-owned boundary and returned true, so attacker-
+      // owned intermediates were silently trusted as a stop point.
+      // Only root-owned (UID 0) directories — typical system dirs
+      // like `/tmp`, `/Users`, `/var` — are safe boundaries.
+      if (st.uid !== 0) return false;
+      return true;
+    }
     const parent = path.dirname(cur);
     if (parent === cur) return true;
     cur = parent;

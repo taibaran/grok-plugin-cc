@@ -27,7 +27,7 @@ import {
   detectAuthSource, grokBaseArgs, effectiveModel, DEFAULT_MODEL,
   cleanGrokEnv, probeWithFallback, checkMinVersion, MIN_GROK_VERSION,
   MODEL_FALLBACK_CHAIN, capabilityProbe,
-  parseGrokJson, writePromptToTempFile
+  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal } from "./lib/render.mjs";
@@ -96,13 +96,15 @@ const EXIT_TIMEOUT = 124;
 // Valid values for --effort, per `grok --help`. We let the user pass any of
 // these through unchanged; anything else is rejected at parse time rather
 // than being surfaced as a confusing CLI error.
-const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-
+// Gemini v0.6.0 round-2 nit-N3: VALID_EFFORTS used to live here and
+// duplicate EFFORT_LEVELS from lib/grok.mjs. Drift risk. Single source of
+// truth lives in lib/grok.mjs now; companion.mjs's validateEffort is a
+// case-insensitive *normalizer* layered on top.
 function validateEffort(effort) {
   if (effort === undefined || effort === null || effort === "") return null;
   const e = String(effort).toLowerCase().trim();
-  if (!VALID_EFFORTS.has(e)) {
-    console.error(`Invalid --effort: ${effort}. Valid values: ${[...VALID_EFFORTS].join(", ")}.`);
+  if (!EFFORT_LEVELS.has(e)) {
+    console.error(`Invalid --effort: ${effort}. Valid values: ${[...EFFORT_LEVELS].join(", ")}.`);
     process.exit(2);
   }
   return e;
@@ -295,8 +297,20 @@ function cmdSetup({ flags }) {
 //   timeoutHint  — optional second sentence after the timeout line.
 //                  cmdAsk / cmdResearch use this to suggest alternate
 //                  --timeout values; cmdBestOf passes "" (no hint).
+// Headless-output cap. spawnSync's default maxBuffer is 1 MiB and on
+// overflow it sets `r.error.code === "ENOBUFS"` while leaving `r.status`
+// as `null`. Codex v0.6.0 round-2: without an explicit bound + error
+// check, a long /grok:research stream silently truncates and the helper
+// exits 0 anyway. 32 MiB is generous for any reasonable headless answer
+// (research streams in the wild are 100-500 KiB) while keeping the cap
+// well below process RSS.
+const HEADLESS_GROK_MAX_BUFFER = 32 * 1024 * 1024;
 function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
-  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  const spawnOpts = {
+    encoding: "utf8",
+    env: cleanGrokEnv(),
+    maxBuffer: HEADLESS_GROK_MAX_BUFFER
+  };
   if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
   const r = spawnSync("grok", args, spawnOpts);
   if (r.error && r.error.code === "ETIMEDOUT") {
@@ -306,14 +320,33 @@ function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
     process.stderr.write(`\n[grok-plugin] ${label} timed out after ${timeoutMs}ms.${hintSuffix}\n`);
     process.exit(EXIT_TIMEOUT);
   }
+  // Codex v0.6.0 round-2 BLOCKING B: spawnSync errors other than ETIMEDOUT
+  // (ENOBUFS, ENOENT, EAGAIN, …) used to fall through to the json-parse
+  // path with status=null and produce a misleading exit 0. Refuse early
+  // and surface the real cause.
+  if (r.error) {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] ${label} failed: ${r.error.code || r.error.message}\n`);
+    if (r.error.code === "ENOBUFS") {
+      process.stderr.write(`[grok-plugin] grok output exceeded ${HEADLESS_GROK_MAX_BUFFER} bytes (HEADLESS_GROK_MAX_BUFFER); rerun via /grok:rescue or /grok:task for a streaming long-form session.\n`);
+    }
+    process.exit(1);
+  }
   const parsed = parseGrokJson(r.stdout || "");
   if (parsed.kind === "text") {
-    process.stdout.write(parsed.text + "\n");
+    // Codex v0.6.0 round-2 BLOCKING A: parsed.text comes from JSON which
+    // can carry escape sequences as  that survive JSON.parse intact.
+    // Without sanitizeForTerminal those reach the user's terminal raw and
+    // are dangerous (OSC 52 clipboard injection, cursor moves, screen
+    // clear, color-spoofed phishing). Same defense as the unparsed-fallback
+    // path below.
+    process.stdout.write(sanitizeForTerminal(parsed.text + "\n"));
     process.exit(0);
   }
   if (parsed.kind === "error") {
     const why = classifyAuthBlob(parsed.message);
-    process.stderr.write(`Grok error: ${parsed.message}\n`);
+    process.stderr.write(`Grok error: ${sanitizeForTerminal(parsed.message)}\n`);
     if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
     process.exit(1);
   }
@@ -341,7 +374,16 @@ function cmdAsk({ flags, positional }) {
   }
   // Always request json output internally so we can detect Grok's
   // exit-0-on-internal-error case and surface a clean error.
-  const args = ["-p", prompt, ...grokBaseArgs({ readOnly: true, model: flags.model, jsonOutput: true })];
+  // Gemini v0.6.0 round-2 nit-N2: thread --no-web-search through here too
+  // so /grok:ask --no-web-search actually disables web search (used to be
+  // silently ignored).
+  const disableWebSearch = !!flags["no-web-search"];
+  const args = ["-p", prompt, ...grokBaseArgs({
+    readOnly: true,
+    model: flags.model,
+    jsonOutput: true,
+    disableWebSearch
+  })];
   args.push("--max-turns", String(DEFAULT_ASK_MAX_TURNS));
   if (effort) args.push("--effort", effort);
   runHeadlessGrok({
@@ -1140,13 +1182,11 @@ function cmdResearch({ flags, positional }) {
   }
   // Research-mode defaults: effort=max, check=true, web-search ON.
   // Override hooks:
-  //   --effort <level>     overrides effort (validated by EFFORT_LEVELS in grokBaseArgs)
+  //   --effort <level>     overrides effort (validated by validateEffort,
+  //                        case-insensitive — Gemini v0.6.0 round-2 G2)
   //   --no-check           explicit opt-out of self-verification loop
-  //                        (Claude general v0.6.0 review nit-5: argument-hint
-  //                        previously didn't expose a way to disable --check;
-  //                        --no-check now mirrors --no-web-search.)
   //   --no-web-search      turn off Grok's built-in live search
-  const effortRaw = flags.effort != null ? flags.effort : "max";
+  const effort = validateEffort(flags.effort) || "max";
   const checkFlag = flags["no-check"] ? false
                  : flags.check === false ? false
                  : true;
@@ -1157,7 +1197,7 @@ function cmdResearch({ flags, positional }) {
       readOnly: true,
       model: flags.model,
       jsonOutput: true,
-      effort: effortRaw,
+      effort,
       check: checkFlag,
       disableWebSearch
     });
@@ -1177,6 +1217,22 @@ function cmdResearch({ flags, positional }) {
 // Wraps `grok models`. Optional --set-default <id> persists the model into
 // the per-workspace activeModel config. Optional --json emits the workspace
 // config + parsed model list as JSON.
+//
+// Codex + Gemini v0.6.0 round-2 BLOCKING (C, also Gemini G1):
+//   The footer used to print `effectiveModel()`, `cfg.activeModel`, and
+//   `GROK_PLUGIN_MODEL` raw. Any of those can carry ANSI/OSC/newline
+//   payloads (env-controlled or LLM-controlled via prompt-injection on
+//   --set-default). Every echoed value now passes through
+//   sanitizeForTerminal(). The --set-default positional is also length-
+//   capped to defuse pathological inputs.
+//
+// Codex v0.6.0 round-2 BLOCKING (third bullet on `/grok:models`):
+//   `grok models` used to run without a timeout — an auth/network hang
+//   could block /grok:models indefinitely. Now bounded by --timeout,
+//   default 30s. Auth failures route through classifyAuthBlob the same
+//   way /grok:ask does.
+const DEFAULT_MODELS_TIMEOUT_MS = 30 * 1000;
+const MAX_MODEL_ID_LEN = 128;
 function cmdModels({ flags, positional }) {
   if (!which("grok")) {
     console.error("Grok CLI not installed. Run `/grok:setup`.");
@@ -1188,23 +1244,33 @@ function cmdModels({ flags, positional }) {
       console.error("Usage: models --set-default <model-id>");
       process.exit(2);
     }
-    setActiveModel(process.cwd(), String(target));
+    const targetStr = String(target);
+    if (targetStr.length > MAX_MODEL_ID_LEN) {
+      console.error(`--set-default value exceeds ${MAX_MODEL_ID_LEN} chars; refusing.`);
+      process.exit(2);
+    }
+    setActiveModel(process.cwd(), targetStr);
+    const safeTarget = sanitizeForTerminal(targetStr);
     if (flags.json) {
-      console.log(JSON.stringify({ ok: true, activeModel: String(target) }));
+      console.log(JSON.stringify({ ok: true, activeModel: targetStr }));
     } else {
-      console.log(`Active model for this workspace set to: ${target}`);
+      console.log(`Active model for this workspace set to: ${safeTarget}`);
       console.log("(Per-call --model still overrides; GROK_PLUGIN_MODEL env still overrides per-call.)");
     }
     process.exit(0);
   }
-  const r = spawnSync("grok", ["models"], { encoding: "utf8", env: cleanGrokEnv() });
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_MODELS_TIMEOUT_MS);
+  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+  const r = spawnSync("grok", ["models"], spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    process.stderr.write(`\n[grok-plugin] models timed out after ${timeoutMs}ms.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
   const out = sanitizeForTerminal(r.stdout || "");
   const err = sanitizeForTerminal(r.stderr || "");
+  const cfg = (() => { try { return readConfig(process.cwd()); } catch { return {}; } })();
   if (flags.json) {
-    // Best-effort parse — `grok models` is plain text today, so we just
-    // return the raw stdout and let the caller eyeball it. If the future
-    // grok CLI grows a `models --json` we'll switch to that.
-    const cfg = (() => { try { return readConfig(process.cwd()); } catch { return {}; } })();
     console.log(JSON.stringify({
       raw: out,
       activeModel: cfg.activeModel || null,
@@ -1215,14 +1281,24 @@ function cmdModels({ flags, positional }) {
   }
   if (out) process.stdout.write(out);
   if (err) process.stderr.write(err);
-  const cfg = (() => { try { return readConfig(process.cwd()); } catch { return {}; } })();
-  process.stdout.write(`\n[grok-plugin] effective model for this workspace: ${effectiveModel(null, process.cwd())}\n`);
-  if (cfg.activeModel) {
-    process.stdout.write(`[grok-plugin] workspace pinned: ${cfg.activeModel}\n`);
+  // Codex v0.6.0 round-2 — if grok models failed, surface auth hint the
+  // same way /grok:ask does.
+  if (r.status !== 0) {
+    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
+    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+    process.exit(r.status ?? 1);
   }
-  process.stdout.write(`[grok-plugin] plugin default: ${DEFAULT_MODEL}\n`);
+  // Sanitize every footer value — cfg.activeModel from disk, env, and
+  // effectiveModel() (which can return either). Defense against ANSI/OSC/
+  // newline payloads in any of those sources.
+  const safeEffective = sanitizeForTerminal(effectiveModel(null, process.cwd()));
+  process.stdout.write(`\n[grok-plugin] effective model for this workspace: ${safeEffective}\n`);
+  if (cfg.activeModel) {
+    process.stdout.write(`[grok-plugin] workspace pinned: ${sanitizeForTerminal(String(cfg.activeModel))}\n`);
+  }
+  process.stdout.write(`[grok-plugin] plugin default: ${sanitizeForTerminal(DEFAULT_MODEL)}\n`);
   if (process.env.GROK_PLUGIN_MODEL) {
-    process.stdout.write(`[grok-plugin] env override (GROK_PLUGIN_MODEL): ${process.env.GROK_PLUGIN_MODEL}\n`);
+    process.stdout.write(`[grok-plugin] env override (GROK_PLUGIN_MODEL): ${sanitizeForTerminal(process.env.GROK_PLUGIN_MODEL)}\n`);
   }
   process.exit(r.status ?? 0);
 }
@@ -1255,7 +1331,8 @@ function cmdBestOf({ flags, positional }) {
     process.exit(2);
   }
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_BESTOF_TIMEOUT_MS);
-  const effort = flags.effort;
+  // Gemini v0.6.0 round-2 G2: same case-insensitive normalization as cmdAsk.
+  const effort = validateEffort(flags.effort);
   const checkFlag = !!flags.check;
   const disableWebSearch = !!flags["no-web-search"];
   if (!which("grok")) {

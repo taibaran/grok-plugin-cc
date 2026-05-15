@@ -9,10 +9,77 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 Three Grok-specific differentiator commands plus refactor of the headless
 dispatcher. Four independent reviewers (Claude / Codex / Gemini / Grok)
-audited; two real bugs found by Grok and five nits found by Claude general
-all landed in this release.
+audited across two rounds; eight real bugs and seven nits all landed in
+this release.
 
-### New commands
+### Round-2 bug fixes (Codex + Gemini)
+
+- **Codex-A. ANSI escapes inside JSON `text` reach the terminal**
+  (`companion.mjs::runHeadlessGrok`). `parsed.text` came from JSON which
+  preserves `` payloads byte-for-byte through `JSON.parse`. Without
+  `sanitizeForTerminal()` those reached the user's terminal raw (OSC 52
+  clipboard injection, cursor moves, screen clear, color-spoofed phishing
+  banners). Helper now sanitizes `parsed.text` and `parsed.message`.
+  (Codex review.)
+
+- **Codex-B. Non-timeout `spawnSync` errors mis-exit 0**
+  (`companion.mjs::runHeadlessGrok`). `ENOBUFS` from a long /grok:research
+  output left `r.status = null` and the helper still parsed + exited 0.
+  Now sets explicit `maxBuffer = HEADLESS_GROK_MAX_BUFFER (32 MiB)` and
+  refuses ALL non-ETIMEDOUT `r.error` codes, with a dedicated ENOBUFS
+  hint pointing the user at `/grok:rescue` / `/grok:task` for streaming
+  long-form sessions. (Codex review.)
+
+- **Codex-C / Gemini-G1. ANSI injection through `/grok:models` footer**
+  (`companion.mjs::cmdModels`). The footer used to print
+  `effectiveModel()`, `cfg.activeModel`, and `GROK_PLUGIN_MODEL` raw —
+  any of those is reachable via env or prompt-injection. All footer
+  values now route through `sanitizeForTerminal()`. The `--set-default`
+  positional gets a 128-char length cap (`MAX_MODEL_ID_LEN`) as
+  defense-in-depth before reaching `setActiveModel`'s strict
+  `MODEL_ID_PATTERN` validator. (Codex + Gemini.)
+
+- **Codex. `/grok:models` has no timeout / auth hint**. An auth or
+  network hang would block `/grok:models` indefinitely. Default timeout
+  is now 30s (`DEFAULT_MODELS_TIMEOUT_MS`), overridable via `--timeout`.
+  Auth failures route through `classifyAuthBlob` the same way
+  `/grok:ask` does. (Codex review.)
+
+- **Gemini-G2. `/grok:research` / `/grok:best-of` rejected `--effort MAX`**
+  (`companion.mjs::cmdResearch`, `cmdBestOf`). `cmdAsk` normalized
+  effort via `validateEffort()` (lowercases/trims); these two bypassed
+  it and passed the raw user value to `grokBaseArgs` which does
+  strict-case whitelist matching. `/grok:research --effort MAX` crashed
+  while `/grok:ask --effort MAX` succeeded — surprising drift. Both
+  now use `validateEffort`. (Gemini review.)
+
+- **Gemini-G3. Tautological tests in `tests/v0-6-0-features.test.mjs`**.
+  The `E2E: research default chain` test reproduced cmdResearch's
+  internal default-flag logic in the test body and asserted on its own
+  local variables. If `cmdResearch` broke, the test still passed.
+  Replaced with subprocess-against-fake-grok tests in
+  `tests/v0-6-0-round2-fixes.test.mjs` — runs the real `companion.mjs`
+  with a fake `grok` on `$PATH` that records its argv to disk, then
+  asserts on what the real CLI actually received. (Gemini review.)
+
+### Round-2 nits (Gemini)
+
+- **N2. `/grok:ask` silently ignored `--no-web-search`** — the flag
+  parsed correctly but `cmdAsk` didn't thread `disableWebSearch` through
+  to `grokBaseArgs`. Fixed; behaviorally tested.
+
+- **N3. `VALID_EFFORTS` in `companion.mjs` duplicated
+  `EFFORT_LEVELS` in `lib/grok.mjs`** — drift risk. Removed the local
+  duplicate; `validateEffort` now consumes the canonical
+  `EFFORT_LEVELS` import.
+
+- **/grok:models auth-hint** (Codex) — added `[hint: auth expired …]`
+  message when `grok models` fails with a recognizable auth blob,
+  matching `/grok:ask` behavior.
+
+### Round-1 fixes (Claude general / Grok — already landed before round-2)
+
+### New commands (initial v0.6.0 scope)
 
 - **`/grok:research <question>`** — deep research mode. Defaults: `--effort max`
   + `--check` self-verification loop + live web search ON. Override hooks:
@@ -59,14 +126,12 @@ all landed in this release.
 
 ### Tests
 
-- 26 new behavior tests in `tests/v0-6-0-features.test.mjs`, totaling 187
-  passing across the suite. Coverage now includes: `grokBaseArgs`
-  validators (effort whitelist, best-of-n cap, integer checks);
-  `parseArgs` end-to-end recognition of `--no-check`, `--no-web-search`,
-  `--best-of-n=N` inline form; cmdResearch default-flag composition;
-  `--no-check` and `--no-web-search` round-trip through the full argv
-  build chain; cmdBestOf dual-form parsing; `setActiveModel` →
-  `readConfig` round-trip; `runHeadlessGrok` extraction sanity.
+- 41 new behavior tests across `tests/v0-6-0-features.test.mjs` and
+  `tests/v0-6-0-round2-fixes.test.mjs`. Total suite: 202 passing.
+  Round-2 tests run `companion.mjs` as a subprocess with a fake `grok`
+  on `$PATH` (writing its argv to disk, env-stripped by `cleanGrokEnv`
+  so handoff uses a sibling `mode` file). This replaces the tautological
+  reproduce-the-logic patterns Gemini flagged in round-2-G3.
 
 ### Known gaps (deferred from this release)
 

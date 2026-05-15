@@ -45,12 +45,31 @@ test("parseAggVerdict recognizes hyphenated/lowercase verdicts (v0.7.2)", async 
   assert.match(src, /AGG_CLEAN_VERDICTS\s*=\s*new Set\(/);
 });
 
-test("commands/aggregate-review.md calls companion.mjs aggregate-review", () => {
+test("commands/aggregate-review.md routes through grok:grok-aggregate-review subagent (v0.8.3)", () => {
   const src = fs.readFileSync(
     new URL("../plugins/grok/commands/aggregate-review.md", import.meta.url),
     "utf8"
   );
-  assert.match(src, /companion\.mjs"\s+aggregate-review/);
+  // v0.8.3: the slash command no longer invokes Bash directly — it
+  // dispatches through the Agent tool with a dedicated subagent
+  // (`grok:grok-aggregate-review`), matching the `/grok:rescue`
+  // pattern. The companion.mjs aggregate-review subcommand still runs
+  // under the hood (the subagent uses one Bash call to invoke it).
+  assert.match(src, /subagent_type:\s*"grok:grok-aggregate-review"/);
+  assert.match(src, /allowed-tools:.*Agent/, "command must permit the Agent tool");
+  assert.match(src, /companion\.mjs.*aggregate-review/, "documentation should still reference the underlying companion subcommand");
+});
+
+test("agents/grok-aggregate-review.md exists with correct structure", () => {
+  const src = fs.readFileSync(
+    new URL("../plugins/grok/agents/grok-aggregate-review.md", import.meta.url),
+    "utf8"
+  );
+  // Subagent must have proper frontmatter — name, description, model, tools.
+  assert.match(src, /name:\s*grok-aggregate-review/);
+  assert.match(src, /tools:\s*Bash/);
+  // Must use companion.mjs aggregate-review under the hood.
+  assert.match(src, /companion\.mjs.*aggregate-review/);
 });
 
 test("companion.mjs uses cleanGrokEnv for each reviewer spawn", () => {

@@ -5,6 +5,38 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-05-15
+
+UX/architecture fix: `/grok:aggregate-review` now appears as an **agent**
+operation in Claude Code (via the `Agent` tool), not as a raw shell call.
+
+### What changed
+
+- **New subagent**: `plugins/grok/agents/grok-aggregate-review.md`
+  (model: sonnet, tools: Bash). A thin forwarder — its only job is to
+  invoke `node companion.mjs aggregate-review ...` and return stdout
+  verbatim. Matches the existing `grok:grok-rescue` pattern.
+- **Slash command rewritten**: `plugins/grok/commands/aggregate-review.md`
+  now dispatches through `Agent(subagent_type: "grok:grok-aggregate-review")`
+  instead of invoking Bash directly. Includes `--background`/`--wait`
+  execution-mode handling per the rescue pattern.
+
+### Why
+
+Users reported the command "appeared as shell, not as a grok agent" in
+the Claude Code UI. The underlying mechanics are identical — companion.mjs
+still does the parallel codex/gemini/grok orchestration with the peer
+plugin routing from v0.7.1 — but the user-visible tool surface is now
+`Agent` rather than `Bash`. This matches how `/grok:rescue` ships and
+gives the command a consistent agent-style entry point.
+
+### Tests
+
+- Updated `tests/v0-7-0-aggregate-review.test.mjs` to assert on the
+  new agent-routing structure (subagent_type, allowed-tools includes
+  Agent, agent definition file shape).
+- Total suite: 265 passing.
+
 ## [0.8.2] - 2026-05-15
 
 Round-3 fixes — `/goal` loop iteration on the v0.8.x line. The

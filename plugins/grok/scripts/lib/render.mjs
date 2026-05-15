@@ -17,18 +17,28 @@
 //   meta.session_id   (legacy: parsed JSON envelope; only trusted for
 //                      jobs that ran with json output — see kind gate)
 //
-// v0.9.7 (Codex P2 round-7): the legacy `session_id` branch is gated on
-// `meta.kind !== "task"`. Task jobs use plain output, so meta.session_id
-// can be populated from a coincidental JSON-shaped model response (a
-// hallucinated sessionId field). Suppress for task. Review/adversarial-
-// review jobs use jsonOutput: true and the parsed sessionId is authoritative.
+// v0.9.7 (Codex P2 round-7) → v0.9.8 (Gemini Nit round-8): the legacy
+// `session_id` branch is trusted only for job kinds known to use
+// jsonOutput: true, where parseGrokJson reliably extracts a real
+// sessionId. The v0.9.7 implementation used a blacklist (`!== "task"`)
+// which would silently trust any future plain-output job kind by
+// default. The whitelist below is fail-closed: a new job kind must
+// be explicitly added before its session_id is trusted.
+//
+// `review` + `adversarial-review` are the two kinds today that use
+// jsonOutput: true (see cmdReview in companion.mjs). cmdTask uses
+// plain output → meta.session_id from a coincidental JSON-shaped
+// model response would be hallucination.
+const TRUSTED_SESSION_ID_KINDS = new Set(["review", "adversarial-review"]);
 export function getSessionProvenance(meta) {
   if (!meta) return null;
   if (meta.requested_session_id) return { kind: "session-id", id: meta.requested_session_id };
   if (typeof meta.requested_resume === "string") return { kind: "resume-id", id: meta.requested_resume };
   if (meta.requested_resume === true) return { kind: "resume-recent" };
   if (meta.requested_continue) return { kind: "continue-recent" };
-  if (meta.session_id && meta.kind !== "task") return { kind: "legacy-session-id", id: meta.session_id };
+  if (meta.session_id && TRUSTED_SESSION_ID_KINDS.has(meta.kind)) {
+    return { kind: "legacy-session-id", id: meta.session_id };
+  }
   return null;
 }
 

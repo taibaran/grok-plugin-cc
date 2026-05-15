@@ -188,33 +188,55 @@ test("v0.9.7 (3/3 round-7): formatSessionHint renders all 5 priority cases (from
   assert.match(hint4, /Continued most-recent/);
   assert.match(hint4, /grok -c/);
 
-  // Priority 5: legacy meta.session_id — only when kind != "task"
+  // Priority 5: legacy meta.session_id — only for trusted kinds
+  // (review + adversarial-review). v0.9.8 (Gemini Nit round-8): switched
+  // from blacklist (!== "task") to whitelist for fail-closed safety.
   const hint5 = formatSessionHint({ session_id: "legacy-x", kind: "review" });
   assert.match(hint5, /Session: legacy-x/);
   assert.match(hint5, /--session-id=legacy-x/);
+  const hint5b = formatSessionHint({ session_id: "legacy-y", kind: "adversarial-review" });
+  assert.match(hint5b, /Session: legacy-y/);
 
-  // Codex P2 round-7: task with session_id suppresses (plain output unreliable).
+  // Task is NOT in the whitelist — suppressed.
   assert.equal(formatSessionHint({ session_id: "from-model", kind: "task" }), null,
-    "task-kind session_id must be suppressed (plain output could have model-hallucinated JSON)");
+    "task-kind session_id must be suppressed");
+  // Unknown kind (a future job type) must also be suppressed (fail-closed).
+  assert.equal(formatSessionHint({ session_id: "x", kind: "interactive-chat" }), null,
+    "v0.9.8: unknown kinds must NOT trust session_id (fail-closed whitelist)");
+  // Missing kind — also suppressed (no kind = can't whitelist).
+  assert.equal(formatSessionHint({ session_id: "x" }), null,
+    "missing kind must NOT trust session_id");
 
   // No provenance → null
   assert.equal(formatSessionHint({}), null);
   assert.equal(formatSessionHint(null), null);
 });
 
-test("v0.9.7 (3/3 round-7): renderJobDetails uses formatSessionLabel from the shared helper", () => {
-  const src = fs.readFileSync(
-    new URL("../plugins/grok/scripts/lib/render.mjs", import.meta.url),
-    "utf8"
-  );
-  const block = src.slice(src.indexOf("export function renderJobDetails"), src.indexOf("return lines.join", src.indexOf("export function renderJobDetails")));
-  // The duplicated priority chain (the v0.9.6 leftover) must be gone.
-  // renderJobDetails should call formatSessionLabel, not inline the chain.
-  assert.match(block, /formatSessionLabel\(meta\)/,
-    "renderJobDetails must call the shared formatSessionLabel — no more duplicate ladder");
-  // And the old duplicated chain must NOT appear in the block.
-  assert.equal(block.includes("meta.requested_session_id"), false,
-    "the duplicated requested_* checks must be removed from renderJobDetails");
+test("v0.9.8 (Grok LOW #1 round-8): renderJobDetails consolidation verified behaviorally (not source-grep)", async () => {
+  // v0.9.7 used a brittle `fs.readFileSync` + indexOf slice + regex
+  // test to assert renderJobDetails called formatSessionLabel. Grok
+  // flagged it as a maintenance hazard. Replaced with two behavioral
+  // assertions: (1) renderJobDetails surfaces the correct session
+  // label for every priority case AND (2) it does NOT surface a
+  // session label for a `kind: "task"` job with a `session_id`
+  // (which would prove the duplicated chain has been removed —
+  // formatSessionLabel correctly suppresses, the old ladder did not).
+  const { renderJobDetails } = await import("../plugins/grok/scripts/lib/render.mjs");
+  const baseMeta = {
+    id: "x-test", kind: "review", status: "completed",
+    started_at: "2026-05-15T00:00:00.000Z", task_text: "t"
+  };
+  // Each priority case must render the corresponding label.
+  assert.match(renderJobDetails({ ...baseMeta, requested_session_id: "ID-A" }), /Session: ID-A/);
+  assert.match(renderJobDetails({ ...baseMeta, requested_resume: "R-1" }), /Resumed session: R-1/);
+  assert.match(renderJobDetails({ ...baseMeta, requested_resume: true }), /Resumed most-recent/);
+  assert.match(renderJobDetails({ ...baseMeta, requested_continue: true }), /Continued most-recent/);
+  assert.match(renderJobDetails({ ...baseMeta, session_id: "LEG", kind: "review" }), /Session: LEG/);
+  // Task-kind session_id MUST NOT appear (regression guard against
+  // re-introducing the duplicated chain that ignored the gate).
+  const taskOut = renderJobDetails({ ...baseMeta, session_id: "from-model", kind: "task" });
+  assert.equal(taskOut.includes("from-model"), false,
+    "task-kind session_id must NOT appear in renderJobDetails (would prove the duplicate ladder is back)");
 });
 
 test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta", () => {
@@ -232,8 +254,10 @@ test("v0.9.7 (3/3 round-7): formatSessionLabel renders all 5 cases (short form)"
   assert.equal(formatSessionLabel({ requested_resume: true }), "Resumed most-recent Grok session");
   assert.equal(formatSessionLabel({ requested_continue: true }), "Continued most-recent Grok session (--continue)");
   assert.equal(formatSessionLabel({ session_id: "leg", kind: "review" }), "Session: leg");
-  // Task-kind session_id suppressed
+  // v0.9.8: any kind NOT in the whitelist suppressed.
   assert.equal(formatSessionLabel({ session_id: "leg", kind: "task" }), null);
+  assert.equal(formatSessionLabel({ session_id: "leg", kind: "interactive-chat" }), null);
+  assert.equal(formatSessionLabel({ session_id: "leg" }), null);
   assert.equal(formatSessionLabel({}), null);
 });
 

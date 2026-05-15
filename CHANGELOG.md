@@ -5,6 +5,43 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-05-15
+
+`/goal` round-8 — first round with **all 3 reviewers explicitly
+approving**: Codex "No actionable issues", Gemini "Ship it.",
+Grok "The diff can merge." 1 Nit + 2 LOW remaining; this release
+applies the 2 actionable ones.
+
+### Polish
+
+- **Gemini Nit round-8 — blacklist → whitelist for trusted session_id**.
+  `getSessionProvenance` gated `session_id` on `meta.kind !== "task"`
+  (blacklist). Future plain-output job kinds would silently inherit
+  trust by default. **Fix**: `TRUSTED_SESSION_ID_KINDS = new Set(["review", "adversarial-review"])` —
+  fail-closed whitelist. A new job kind must be explicitly added
+  before its parsed session_id is trusted.
+
+- **Grok LOW #1 round-8 — brittle source-grep test replaced with behavioral**.
+  v0.9.7's regression guard used `fs.readFileSync` + `indexOf` slice
+  + regex on `lib/render.mjs` source — fragile to refactors. Replaced
+  with a behavioral test that calls `renderJobDetails` for every
+  priority case AND asserts task-kind session_id is suppressed in
+  actual output. Same coverage, immune to formatting changes.
+
+### Tests
+
+- 1 replaced (source-grep → behavioral) + 3 extended cases (whitelist
+  enforcement: task / unknown-kind / missing-kind all suppressed).
+- Total: 330 passing + 5 integration (skipped).
+
+### Status
+
+After 8 `/goal` rounds in v0.9.x, all `correctness` and `important`
+findings have been resolved. Grok LOW #2 (small cosmetic duplication
+between `formatSessionHint` and `formatSessionLabel` switch ladders)
+is acknowledged as acceptable — both functions are simple, have
+distinct documented purposes, and consolidation would obscure intent.
+
 ## [0.9.7] - 2026-05-15
 
 `/goal` round-7 — 3/3 reviewer convergence (every round, every round) on

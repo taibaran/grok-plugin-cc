@@ -264,7 +264,20 @@ export function detectAuthSource() {
 //
 // These tool IDs come from the README's "Tool Filtering" section, not
 // display names.
-export const READ_ONLY_DISALLOWED_TOOLS = "search_replace,run_terminal_cmd,todo_write";
+// v0.7.3 (Grok research-doom-loop bug): when grok is spawned inside a
+// directory that contains our plugin (e.g., the dev tree or a project
+// that depends on it), grok auto-discovers our `plugins/grok/skills/*`
+// and exposes them as callable tools. The model then calls
+// `grok-cli-runtime` etc. as if they were integration tools and the
+// CLI panics ("use_tool can only dispatch to integration tools"). After
+// 5 repeats, doom-loop termination kicks in and grok exits with no
+// useful output.
+//
+// These skills are meant to be invoked by the `grok-rescue` SUBAGENT
+// (Claude Sonnet wrapper), not by grok itself. Banning them from
+// grok's tool surface closes the loop entirely.
+export const GROK_PLUGIN_SKILL_NAMES = "grok-cli-runtime,grok-prompting,grok-result-handling";
+export const READ_ONLY_DISALLOWED_TOOLS = `search_replace,run_terminal_cmd,todo_write,${GROK_PLUGIN_SKILL_NAMES}`;
 
 // Tools to disallow during the auth probe. The probe sends a trivial "say
 // OK" prompt — it has no business calling ANY tool, so we ban the full
@@ -273,7 +286,7 @@ export const READ_ONLY_DISALLOWED_TOOLS = "search_replace,run_terminal_cmd,todo_
 // makes the difference between "real work, read-only" and "minimal liveness
 // check" explicit in the code, addressing Codex's "inconsistent policy"
 // finding.
-export const AUTH_PROBE_DISALLOWED_TOOLS = "Agent,run_terminal_cmd,search_replace,web_search,web_fetch,todo_write";
+export const AUTH_PROBE_DISALLOWED_TOOLS = `Agent,run_terminal_cmd,search_replace,web_search,web_fetch,todo_write,${GROK_PLUGIN_SKILL_NAMES}`;
 
 // Build the base argument vector for a non-interactive `grok -p` invocation.
 //

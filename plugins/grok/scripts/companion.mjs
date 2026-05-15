@@ -1167,7 +1167,14 @@ function cmdPurge({ flags }) {
 // Default timeout 30 min (research streams can run multi-minute) but the
 // user can override with --timeout.
 const DEFAULT_RESEARCH_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_RESEARCH_MAX_TURNS = 60;
+// v0.7.3: bumped from 60 → 200. The grok CLI counts every internal
+// reasoning + tool-call as a turn. Deep research that legitimately
+// needs to read 10-20 files burns 80+ turns just on file reads before
+// composing the answer. 60 was tripping users with "Internal error:
+// max_turns exceeded" on real research prompts. 200 leaves comfortable
+// headroom while still acting as a runaway bound (the --timeout layer
+// is the real DoS guard).
+const DEFAULT_RESEARCH_MAX_TURNS = 200;
 
 function cmdResearch({ flags, positional }) {
   const prompt = positional.join(" ").trim();

@@ -5,6 +5,37 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-05-15
+
+Two real bugs discovered while running the v0.8.0 research pass with
+all four LLMs against the plugin's own source tree.
+
+### Bug fixes
+
+- **Grok doom-loop on plugin skill discovery** (`lib/grok.mjs`).
+  When `grok` is spawned in a directory containing the plugin source
+  (the dev tree or any project that bundles the plugin), grok
+  auto-discovers `plugins/grok/skills/grok-cli-runtime`,
+  `grok-prompting`, and `grok-result-handling` and exposes them as
+  callable tools. The model then calls `grok-cli-runtime` as if it
+  were an integration tool; the CLI panics ("`use_tool can only
+  dispatch to integration tools`"); after 5 repeats the doom-loop
+  guard terminates the session with no useful output. Fix: added the
+  three skill names to `READ_ONLY_DISALLOWED_TOOLS` and
+  `AUTH_PROBE_DISALLOWED_TOOLS` via a new
+  `GROK_PLUGIN_SKILL_NAMES` constant so grok never sees them as tools.
+
+- **`DEFAULT_RESEARCH_MAX_TURNS` was too low** (`companion.mjs`).
+  The 60-turn budget was tripping users with `Internal error:
+  max_turns exceeded` on legitimate deep research prompts that
+  require reading 10-20 files (each file read burns a turn). Bumped
+  to 200, with a comment noting `--timeout` is the real DoS guard.
+
+### Tests
+
+- 5 new regression tests in `tests/v0-7-3-grok-skill-doom-loop.test.mjs`.
+- Total suite: 231 passing.
+
 ## [0.7.2] - 2026-05-15
 
 Round-2 bug fixes for `/grok:aggregate-review`, found by running

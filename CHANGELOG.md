@@ -5,6 +5,85 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-15
+
+Round 3 of independent review. Codex, Gemini, and Grok all approved v0.3.0
+for production but surfaced 8 follow-up improvements (4 real bugs, 4
+defense-in-depth). All 8 are addressed here. 141 tests total (was 121).
+
+### Real bugs fixed
+
+- **B1. UTF-8 chunk tearing** (`companion.mjs::runJob`,
+  `stop-review-gate-hook.mjs`). `proc.stdout.on("data", d => d.toString())`
+  on raw Buffer chunks decodes multi-byte UTF-8 sequences split across
+  chunks to `U+FFFD`, silently corrupting the JSON envelope and any
+  user-visible output. Fix: `proc.stdout.setEncoding("utf8")` so Node's
+  internal StringDecoder buffers incomplete sequences across data events.
+  (Gemini round-3.)
+
+- **B2. Branch diff capture used wrong git argument order** (`lib/git.mjs`).
+  `git diff -- <ref>...HEAD` makes git interpret the refspec as a pathspec
+  — the command exited 0 with empty output and the fallback never fired,
+  silently producing "nothing to review" for any `--scope branch` review.
+  Fix: drop the misplaced `--`; the refspec validator already prevents
+  flag injection. (Codex round-3.)
+
+- **B3. Read-only tool policy was inconsistent across call sites**
+  (`lib/grok.mjs`). `grokBaseArgs` banned 3 tools, `authProbe` banned 6.
+  Extracted to named constants `READ_ONLY_DISALLOWED_TOOLS` (banishes
+  writes + shell but keeps web search + Agent for grounding) and
+  `AUTH_PROBE_DISALLOWED_TOOLS` (banishes all tools for the deterministic
+  probe). The difference is now intentional, named, and traceable.
+  (Codex round-3.)
+
+- **B4. `parseGrokJson` did not match the stop-gate's robust parser**
+  (`companion.mjs`, `lib/verdict.mjs`). The companion called
+  `JSON.parse(clean)` on the whole blob and silently fell through to
+  "unknown" — any tracing noise between the envelope and EOF flipped error
+  envelopes to "completed". Extracted `findLastJsonObject` into
+  `lib/verdict.mjs` and used in both `parseGrokJson` (companion) and
+  `parseGrokJsonEnvelope` (hook). The two parsers can no longer drift.
+  (Codex round-3.)
+
+### Defense-in-depth
+
+- **B5. `/grok:result` reads are now bounded** (`companion.mjs`). New
+  `readBoundedFile` caps stdout/stderr display reads at
+  `MAX_REVIEW_JSON_BYTES` (8 MiB) with an explicit truncation marker. The
+  on-disk file remains complete for forensic use. (Codex round-3.)
+
+- **B6. `/grok:imagine` media-path shell-injection defense** (`companion.mjs`).
+  The `open "${mediaPath}"` hint was a copy-paste shell-injection vector:
+  a content-policy-bypassing model returning `![alt]("; rm -rf ~; #)`
+  would have the plugin display `open ""; rm -rf ~; #"` for the user to
+  copy. New `isSafeMediaPath` validates with a conservative regex
+  (`^[A-Za-z0-9._/\-%@+]+$`); unsafe paths get a warning instead of an
+  open command. (Gemini round-3.)
+
+- **B7. JSON review schema vs prose alignment + strict validation**
+  (`prompts/review.md`, `companion.mjs`). The prompt taught
+  `Critical/Important/Nit` but the schema required
+  `critical/high/medium/low`. Updated the prompt to use the schema's four
+  levels. The shallow validator was replaced with a strict pass that
+  enforces severity enum, bounded string lengths (64 KiB per field), and
+  bounded array lengths (256 items) — defending against a misbehaving
+  model returning a 5 MiB `summary` that locks up the terminal.
+  (Grok round-3.)
+
+- **B8. `isAlive` EPERM handling** (`lib/process.mjs`). The old contract
+  was "EPERM → alive" to avoid reaping jobs owned by another user; in
+  the plugin's threat model EPERM only happens on PID reuse (our PID
+  exited; the kernel handed it to a daemon from another UID). Returning
+  true caused state accumulation: pruneJobs thought the job was still
+  alive, terminateProcessTree couldn't kill the foreign process. Now
+  treats EPERM as "not our process anymore" and returns false.
+  (Gemini round-3.)
+
+### Tests
+
+- 20 new regression tests in `tests/v0-4-0-hardening.test.mjs` pin each
+  of the 8 fixes against future drift. Total: 141 tests, all passing.
+
 ## [0.3.0] - 2026-05-15
 
 Hardening release. Three independent reviewers (Codex, Gemini, Grok)

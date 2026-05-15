@@ -5,6 +5,45 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-05-15
+
+`/goal` round-9 — **3/3 explicit approval**. Gemini even returned a
+parsed `VERDICT: SHIP` for the first time (the aggregator's status
+column showed `ok` for the first time in v0.9.x). 1 Nit + 1 LOW
+remaining; this release applies both.
+
+### Polish
+
+- **Grok LOW round-9 — Trust decision moved to job-creation site**.
+  v0.9.8's whitelist (`TRUSTED_SESSION_ID_KINDS = ["review",
+  "adversarial-review"]`) lived in `lib/render.mjs`. Adding a new
+  json-output job kind would require remembering to update that list
+  too. **Fix**: `runJob`'s close handler now sets
+  `meta.session_id_trustworthy = !!meta.json_output` when it
+  populates `meta.session_id`. The renderer reads that flag. The
+  trust decision now lives WITH the job creator, where it knows
+  whether the JSON envelope is authoritative.
+  Backward-compat: old job-meta files without the flag fall back to
+  the v0.9.8 kind whitelist so existing review/adversarial-review
+  jobs don't suddenly lose their hint.
+
+- **Gemini Nit round-9 — Test dynamic imports → top-level**.
+  Three tests used `await import("...lib/render.mjs")` inside their
+  bodies. Moved to a top-level import block matching the rest of
+  the test file's style.
+
+### Status
+
+- 8 `/goal` rounds in v0.9.x, all "correctness" + "important"
+  findings resolved.
+- v0.9.x is **shippable** per all 3 reviewers (Codex+Gemini+Grok)
+  in round-9.
+- 330 fake-grok tests + 5 real-grok integration tests (skipped by
+  default; verified passing locally against grok 0.1.210).
+- 4 new commands (worktree/sessions/memory/mcp) + 6 new flags
+  (--worktree, --continue, --resume, --restore-code, --no-memory,
+  --experimental-memory) — full Native Grok Differentiators surface.
+
 ## [0.9.8] - 2026-05-15
 
 `/goal` round-8 — first round with **all 3 reviewers explicitly

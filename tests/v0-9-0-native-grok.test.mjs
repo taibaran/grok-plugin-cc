@@ -15,6 +15,9 @@ import {
   COMMON_REPEATABLE_FLAGS, COMMON_OPTIONAL_VALUE_FLAGS
 } from "../plugins/grok/scripts/lib/args.mjs";
 import { grokBaseArgs } from "../plugins/grok/scripts/lib/grok.mjs";
+// v0.9.9 (Gemini Nit round-9): moved from dynamic `await import()` to
+// top-level imports for consistency with the rest of this file.
+import { renderJobDetails, formatSessionHint, formatSessionLabel, getSessionProvenance } from "../plugins/grok/scripts/lib/render.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(__dirname, "../plugins/grok/scripts/companion.mjs");
@@ -165,7 +168,7 @@ test("v0.9.1: --worktree=false treats as bool false", () => {
 test("v0.9.7 (3/3 round-7): formatSessionHint renders all 5 priority cases (from render.mjs)", async () => {
   // v0.9.7: moved from companion.mjs to lib/render.mjs (single source
   // of truth shared with renderJobDetails). Import path updated.
-  const { formatSessionHint } = await import("../plugins/grok/scripts/lib/render.mjs");
+  // (formatSessionHint imported at top of file in v0.9.9)
   // Priority 1: explicit --session-id (use --session-id= for create-or-resume + grok -r for raw)
   const hint1 = formatSessionHint({ requested_session_id: "myname" });
   assert.match(hint1, /Session: myname/);
@@ -221,7 +224,7 @@ test("v0.9.8 (Grok LOW #1 round-8): renderJobDetails consolidation verified beha
   // session label for a `kind: "task"` job with a `session_id`
   // (which would prove the duplicated chain has been removed —
   // formatSessionLabel correctly suppresses, the old ladder did not).
-  const { renderJobDetails } = await import("../plugins/grok/scripts/lib/render.mjs");
+  // (renderJobDetails imported at top of file in v0.9.9)
   const baseMeta = {
     id: "x-test", kind: "review", status: "completed",
     started_at: "2026-05-15T00:00:00.000Z", task_text: "t"
@@ -248,7 +251,7 @@ test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta
 });
 
 test("v0.9.7 (3/3 round-7): formatSessionLabel renders all 5 cases (short form)", async () => {
-  const { formatSessionLabel } = await import("../plugins/grok/scripts/lib/render.mjs");
+  // (formatSessionLabel imported at top of file in v0.9.9)
   assert.equal(formatSessionLabel({ requested_session_id: "x" }), "Session: x");
   assert.equal(formatSessionLabel({ requested_resume: "abc" }), "Resumed session: abc");
   assert.equal(formatSessionLabel({ requested_resume: true }), "Resumed most-recent Grok session");

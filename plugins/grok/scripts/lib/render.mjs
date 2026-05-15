@@ -17,27 +17,37 @@
 //   meta.session_id   (legacy: parsed JSON envelope; only trusted for
 //                      jobs that ran with json output — see kind gate)
 //
-// v0.9.7 (Codex P2 round-7) → v0.9.8 (Gemini Nit round-8): the legacy
-// `session_id` branch is trusted only for job kinds known to use
-// jsonOutput: true, where parseGrokJson reliably extracts a real
-// sessionId. The v0.9.7 implementation used a blacklist (`!== "task"`)
-// which would silently trust any future plain-output job kind by
-// default. The whitelist below is fail-closed: a new job kind must
-// be explicitly added before its session_id is trusted.
+// v0.9.7 → v0.9.8 → v0.9.9: the legacy `session_id` trust gate has
+// moved progressively closer to the job-creation site:
+//   v0.9.7: blacklist `kind !== "task"` in renderer.
+//   v0.9.8: whitelist `kind in {review, adversarial-review}` in renderer.
+//   v0.9.9 (Grok LOW round-9): read `meta.session_id_trustworthy`, a
+//     flag SET BY runJob's close handler whenever it populates session_id
+//     AND the job had `json_output: true`. The trust decision now lives
+//     with the code that knows whether the JSON envelope is authoritative;
+//     the renderer just consumes the flag.
 //
-// `review` + `adversarial-review` are the two kinds today that use
-// jsonOutput: true (see cmdReview in companion.mjs). cmdTask uses
-// plain output → meta.session_id from a coincidental JSON-shaped
-// model response would be hallucination.
-const TRUSTED_SESSION_ID_KINDS = new Set(["review", "adversarial-review"]);
+// Future plain-output job kinds are automatically untrusted (no flag),
+// without needing to add them to a list here.
+//
+// Backward compatibility: older job-meta JSON files on disk may have
+// a `session_id` set without the trust flag (pre-v0.9.9 jobs). Trust
+// those only when meta.kind matches the kinds known to have used
+// jsonOutput: true historically — same set as v0.9.8 — so existing
+// review/adversarial-review jobs don't suddenly lose their hint.
+const LEGACY_TRUSTED_SESSION_ID_KINDS = new Set(["review", "adversarial-review"]);
 export function getSessionProvenance(meta) {
   if (!meta) return null;
   if (meta.requested_session_id) return { kind: "session-id", id: meta.requested_session_id };
   if (typeof meta.requested_resume === "string") return { kind: "resume-id", id: meta.requested_resume };
   if (meta.requested_resume === true) return { kind: "resume-recent" };
   if (meta.requested_continue) return { kind: "continue-recent" };
-  if (meta.session_id && TRUSTED_SESSION_ID_KINDS.has(meta.kind)) {
-    return { kind: "legacy-session-id", id: meta.session_id };
+  if (meta.session_id) {
+    // v0.9.9: explicit trust flag wins. If absent (pre-v0.9.9 job meta),
+    // fall back to the kind whitelist for backward compatibility.
+    const trusted = meta.session_id_trustworthy === true ||
+      (meta.session_id_trustworthy === undefined && LEGACY_TRUSTED_SESSION_ID_KINDS.has(meta.kind));
+    if (trusted) return { kind: "legacy-session-id", id: meta.session_id };
   }
   return null;
 }

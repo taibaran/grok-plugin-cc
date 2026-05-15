@@ -597,6 +597,12 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         meta.exit_code = code;
         if (parsedOut.kind === "text" && parsedOut.sessionId) {
           meta.session_id = parsedOut.sessionId;
+          // v0.9.9 (Grok LOW round-9): record whether this sessionId
+          // came from a job that actually requested JSON output. Render
+          // helpers can then trust it conditionally without re-deriving
+          // the decision from `meta.kind`. The trust flag is set HERE,
+          // at the job-creation site, not duplicated in the renderer.
+          meta.session_id_trustworthy = !!meta.json_output;
         }
         meta.ended_at = new Date().toISOString();
         writeJobMeta(meta.id, meta);

@@ -5,6 +5,64 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-05-15
+
+Round-2 fixes for v0.8.0, found by running the new `/grok:aggregate-review`
+on v0.8.0's own diff (HEAD~1..HEAD). Codex (via peer) flagged 3 issues
+and Grok (via peer) flagged 5 — every fix below traces to a real
+reviewer-found bug.
+
+### Bug fixes
+
+- **Grok HIGH — `--restore-code` dead flag**. Was added to
+  `COMMON_BOOL_FLAGS` in v0.8.0 but never wired to `extractPolicyFlags`,
+  `grokBaseArgs`, or `capabilityProbe`. Silently dropped. **Removed**
+  from the flag set until v0.9.0 builds out the resume path.
+
+- **Grok MEDIUM — control-byte regex allowed TAB + LF**
+  (`lib/grok.mjs::validateRuleArray`). The v0.8.0 regex
+  `[\x00-\x08\x0b-\x1f\x7f]` accepted `\x09` (tab) and `\x0a` (newline).
+  A `--rules "evil\nadditional directive"` could survive validation and
+  end up echoed back into model context. **Fix**: split into two
+  validators — `CONTROL_BYTE_STRICT` (no TAB, no LF, used by
+  `--allow`/`--deny`/`--rules`/`--tools`/`--sandbox`/`--agent`) and
+  `CONTROL_BYTE_MULTILINE` (TAB + LF + CR allowed, used by
+  `--system-prompt-override` since real system prompts have
+  paragraphs).
+
+- **Grok MEDIUM — `cmdTask` skipped policy flags**
+  (`companion.mjs::cmdTask`). The v0.8.0 changelog claimed "Permission
+  Model Parity" but `/grok:task` (the write-mode rescue) still called
+  `grokBaseArgs({readOnly, model, jsonOutput})` directly, dropping
+  `--allow`/`--deny`/`--rules`/`--max-turns`/etc. **Fix**: `cmdTask`
+  now uses `...extractPolicyFlags(flags)` like the other commands.
+
+- **Codex P2.a — `cmdReview` leaked prompt file on validation failure**
+  (`companion.mjs::cmdReview`). Calling `/grok:review --max-turns nope`
+  would write the full diff prompt file via `writePromptToTempFile`,
+  then `grokBaseArgs` would throw on the invalid `--max-turns`, and
+  the early-exit path would leave the file in `/tmp`. **Fix**:
+  `try { fs.unlinkSync(promptFile) } catch {}` inside the catch.
+
+- **Codex P2.b — `cmdInspect` had no `maxBuffer`**
+  (`companion.mjs::cmdInspect`). `grok inspect` output can exceed
+  spawnSync's 1 MiB default in projects with many skills/MCPs;
+  exceeded buffer left `r.status: null` and the helper exited 0 with
+  truncated output. **Fix**: explicit `maxBuffer = HEADLESS_GROK_MAX_BUFFER`
+  + ENOBUFS detection + hint pointing the user at `--json` redirect.
+
+- **Codex P3 — `--flag=value` corrupted values containing `=`**
+  (`lib/args.mjs::parseArgs`). The old `t.slice(2).split("=", 2)` form
+  returns only the first 2 array slots, so `--system-prompt-override=Use A=B`
+  became `{key: "system-prompt-override", value: "Use A"}` — the trailing
+  `=B` was silently dropped. **Fix**: split on FIRST `=` using
+  `indexOf("=")` + slice, preserving every `=` after the first separator.
+
+### Tests
+
+- 9 new regression tests in `tests/v0-8-0-permission-rules.test.mjs`.
+- Total suite: 262 passing.
+
 ## [0.8.0] - 2026-05-15
 
 **"Permission Model Parity + Inspectability"** — the v0.8.0 release the

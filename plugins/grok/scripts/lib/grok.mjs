@@ -343,6 +343,23 @@ export const PERMISSION_MODES = new Set([
 const MAX_PERMISSION_RULES = 256;
 const MAX_PERMISSION_RULE_LEN = 1024;
 
+// v0.8.1 (Grok aggregate-review round-2 MEDIUM #1):
+//
+// CONTROL_BYTE_STRICT rejects ALL C0 control bytes (0x00-0x1F + 0x7F)
+// including TAB (0x09) and LF (0x0A). Used for single-line tokens
+// where a literal newline is never legitimate: --allow / --deny /
+// --rules (inline form; @file path is also one line), --tools (CSV),
+// --sandbox profile name, --agent name.
+//
+// CONTROL_BYTE_MULTILINE allows TAB + LF + CR but rejects every other
+// C0 control. Used for --system-prompt-override where multi-line
+// content is the whole point. The v0.8.0 regex used the multi-line
+// variant for ALL of them, allowing a `--rules "evil\nadditional
+// directive"` to slip past validation and be echoed back into model
+// context. Splitting the validators closes that exactly.
+const CONTROL_BYTE_STRICT = /[\x00-\x1f\x7f]/;
+const CONTROL_BYTE_MULTILINE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
 function validateRuleArray(name, arr) {
   if (arr == null) return null;
   if (!Array.isArray(arr)) {
@@ -361,12 +378,10 @@ function validateRuleArray(name, arr) {
     if (r.length > MAX_PERMISSION_RULE_LEN) {
       throw new Error(`--${name} rule exceeds ${MAX_PERMISSION_RULE_LEN} chars`);
     }
-    // Reject ANSI/control bytes early — these get rendered when grok
-    // echoes the rule in error messages and become a prompt-injection
-    // vector. The plugin's threat model treats CLI input as
-    // LLM-controllable.
-    if (/[\x00-\x08\x0b-\x1f\x7f]/.test(r)) {
-      throw new Error(`--${name} rule contains control bytes`);
+    // Strict — no TAB, no LF, no other C0. Each rule is a single-line
+    // token; multi-line content goes through --rules @file.
+    if (CONTROL_BYTE_STRICT.test(r)) {
+      throw new Error(`--${name} rule contains control bytes (incl. tab/newline)`);
     }
   }
   return arr;
@@ -508,24 +523,27 @@ export function grokBaseArgs({
     if (s.length > 16 * 1024) {
       throw new Error(`--system-prompt-override too long (>${16 * 1024} chars). Use --rules @file for large rules.`);
     }
-    if (/[\x00-\x08\x0b-\x1f\x7f]/.test(s)) {
-      throw new Error(`--system-prompt-override contains control bytes`);
+    // Multi-line allowed (system prompts have paragraphs). Strip
+    // anything else — DEL, BEL, ESC, vertical tab, etc.
+    if (CONTROL_BYTE_MULTILINE.test(s)) {
+      throw new Error(`--system-prompt-override contains forbidden control bytes (newline + tab OK)`);
     }
     args.push("--system-prompt-override", s);
   }
   if (sandbox != null && sandbox !== "") {
     // grok accepts arbitrary profile names; we just sanity-check length
-    // and control bytes. The "real" defense is the kernel's own
-    // sandboxing — we're just passing the name through.
+    // and control bytes (strict — single-line token). The "real"
+    // defense is the kernel's own sandboxing — we're just passing the
+    // name through. Slash is also rejected to defuse `../etc/passwd`.
     const s = String(sandbox);
-    if (s.length > 128 || /[\x00-\x08\x0b-\x1f\x7f\/]/.test(s)) {
+    if (s.length > 128 || CONTROL_BYTE_STRICT.test(s) || s.includes("/")) {
       throw new Error(`--sandbox profile name invalid: ${s.slice(0, 32)}`);
     }
     args.push("--sandbox", s);
   }
   if (agent != null && agent !== "") {
     const s = String(agent);
-    if (s.length > 128 || /[\x00-\x08\x0b-\x1f\x7f\/]/.test(s)) {
+    if (s.length > 128 || CONTROL_BYTE_STRICT.test(s) || s.includes("/")) {
       throw new Error(`--agent name invalid: ${s.slice(0, 32)}`);
     }
     args.push("--agent", s);

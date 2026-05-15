@@ -777,6 +777,10 @@ async function cmdReview({ flags, positional }, { adversarial }) {
       ...extractPolicyFlags(flags)
     });
   } catch (e) {
+    // v0.8.1 (Codex P2.a): the prompt file was already written by
+    // writePromptToTempFile above; we must clean it up on the early-exit
+    // path or the full review diff leaks into /tmp.
+    try { fs.unlinkSync(promptFile); } catch {}
     console.error(String(e.message || e));
     process.exit(2);
   }
@@ -1030,8 +1034,27 @@ async function cmdTask({ flags, positional }) {
 
   // Plain output during a task: the user is interactively watching Grok
   // think. JSON detection still applies via the on-close handler.
-  const args = ["-p", taskText, ...grokBaseArgs({ readOnly: !isWrite, model: flags.model, jsonOutput: false })];
-  if (effort) args.push("--effort", effort);
+  // v0.8.1 (Grok aggregate-review round-2 MED #2): /grok:task now also
+  // accepts --allow / --deny / --rules / --max-turns / --tools / etc.,
+  // matching /grok:ask, /grok:review, /grok:research, /grok:best-of.
+  let policyArgs;
+  try {
+    policyArgs = grokBaseArgs({
+      readOnly: !isWrite,
+      model: flags.model,
+      jsonOutput: false,
+      effort,
+      ...extractPolicyFlags(flags)
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const args = ["-p", taskText, ...policyArgs];
+  // If user supplied --max-turns it's already in policyArgs; we don't
+  // override it here. The grok CLI default applies when neither side
+  // sets it (cmdTask historically never set a default — keep it that
+  // way for long-running rescues).
 
   // Optional session-id continuation: -s creates a new session if not found,
   // -r requires it exists. We surface both via --session-id and --resume on
@@ -1927,12 +1950,28 @@ function cmdInspect({ flags }) {
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_INSPECT_TIMEOUT_MS);
   const argv = ["inspect"];
   if (flags.json) argv.push("--json");
-  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  // v0.8.1 (Codex P2.b): grok inspect output can exceed spawnSync's
+  // 1 MiB default maxBuffer in workspaces with many skills/MCPs. Match
+  // the runHeadlessGrok pattern: explicit maxBuffer + ENOBUFS detection.
+  const spawnOpts = {
+    encoding: "utf8",
+    env: cleanGrokEnv(),
+    maxBuffer: HEADLESS_GROK_MAX_BUFFER
+  };
   if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
   const r = spawnSync("grok", argv, spawnOpts);
   if (r.error && r.error.code === "ETIMEDOUT") {
     process.stderr.write(`\n[grok-plugin] inspect timed out after ${timeoutMs}ms.\n`);
     process.exit(EXIT_TIMEOUT);
+  }
+  if (r.error) {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] inspect failed: ${r.error.code || r.error.message}\n`);
+    if (r.error.code === "ENOBUFS") {
+      process.stderr.write(`[grok-plugin] inspect output exceeded ${HEADLESS_GROK_MAX_BUFFER} bytes; try --json and redirect to a file.\n`);
+    }
+    process.exit(1);
   }
   if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
   if (r.status !== 0) {

@@ -255,6 +255,102 @@ test("E2E: /grok:inspect --json passes the flag through", t => {
 // capabilityProbe regression
 // ============================================================================
 
+// ============================================================================
+// v0.8.1 round-2 fixes (from aggregate-review's own findings)
+// ============================================================================
+
+test("v0.8.1 (Codex P3): --flag=value with `=` in value preserves the suffix (pre-tokenized argv)", () => {
+  // The fix lives in parseArgs's `indexOf("=")` (not `split("=", 2)`).
+  // Use a multi-element argv so the `argv.length === 1` shell-split
+  // special case in tokenize() doesn't fire — that simulates how the
+  // CLI receives args from a quoted slash-command invocation
+  // (`/grok:ask --system-prompt-override="Use A=B and C=D"` → after
+  // shell quoting → the single arg becomes one element after
+  // tokenize, with `=` and `A=B` preserved).
+  const r = parseArgs(["--system-prompt-override=Use_A=B_and_C=D", "extra"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS
+  });
+  assert.equal(r.flags["system-prompt-override"], "Use_A=B_and_C=D",
+    "every `=` after the first separator must be preserved");
+  // Sanity that the old broken behavior would have produced "Use_A" here.
+});
+
+test("v0.8.1 (Codex P3): quoted inline form preserves spaces + `=` via shell-split tokenizer", () => {
+  // This mirrors what happens when a user types:
+  //   /grok:ask --system-prompt-override="Use A=B and C" question
+  // The $ARGUMENTS string after shell quoting is one arg with embedded
+  // quotes; tokenize's splitRawArgumentString unwraps the quotes and
+  // emits a single argv element with the spaces preserved.
+  const r = parseArgs([`--system-prompt-override="Use A=B and C" question`], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS
+  });
+  assert.equal(r.flags["system-prompt-override"], "Use A=B and C");
+  assert.deepEqual(r.positional, ["question"]);
+});
+
+test("v0.8.1 (Codex P3): repeatable --rules=text with `=` works too", () => {
+  const r = parseArgs(["--rules=k=v", "--rules=other=thing"], {
+    boolFlags: COMMON_BOOL_FLAGS,
+    valueFlags: COMMON_VALUE_FLAGS,
+    repeatableFlags: COMMON_REPEATABLE_FLAGS
+  });
+  assert.deepEqual(r.flags.rules, ["k=v", "other=thing"]);
+});
+
+test("v0.8.1 (Grok HIGH): --restore-code no longer in COMMON_BOOL_FLAGS", () => {
+  assert.equal(COMMON_BOOL_FLAGS.has("restore-code"), false,
+    "--restore-code was registered but never wired through — removed in v0.8.1 until v0.9.0 session resume lands");
+});
+
+test("v0.8.1 (Grok MED #1): --allow rejects TAB and NEWLINE in rule strings", () => {
+  // CRITICAL: v0.8.0 regex allowed 0x09 (tab) and 0x0a (newline) through
+  // — a `--rules "evil\nadditional directive"` could survive validation
+  // and be echoed back into model context.
+  assert.throws(() => grokBaseArgs({ allow: ["Bash(rm*)\nmalicious"] }), /control bytes/i);
+  assert.throws(() => grokBaseArgs({ deny: ["foo\tbar"] }), /control bytes/i);
+  assert.throws(() => grokBaseArgs({ rules: ["legit rule\nthen secret"] }), /control bytes/i);
+});
+
+test("v0.8.1 (Grok MED #1): --system-prompt-override still allows newlines + tabs (multi-line by design)", () => {
+  const args = grokBaseArgs({ systemPromptOverride: "Line 1\nLine 2\tcolumn 2" });
+  assert.ok(args.includes("--system-prompt-override"));
+});
+
+test("v0.8.1 (Grok MED #1): --system-prompt-override rejects ESC + BEL + DEL etc.", () => {
+  assert.throws(() => grokBaseArgs({ systemPromptOverride: "before\x1bescape" }), /control bytes/i);
+  assert.throws(() => grokBaseArgs({ systemPromptOverride: "bell\x07" }), /control bytes/i);
+  assert.throws(() => grokBaseArgs({ systemPromptOverride: "del\x7f" }), /control bytes/i);
+});
+
+test("v0.8.1 (Codex P2.b): cmdInspect uses HEADLESS_GROK_MAX_BUFFER + ENOBUFS hint", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const block = src.slice(src.indexOf("function cmdInspect"), src.indexOf("async function main"));
+  assert.match(block, /maxBuffer:\s*HEADLESS_GROK_MAX_BUFFER/);
+  assert.match(block, /ENOBUFS/);
+});
+
+test("v0.8.1 (Codex P2.a): cmdReview unlinks promptFile on validation failure", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // Look in cmdReview's catch block — must call fs.unlinkSync(promptFile)
+  // before process.exit(2).
+  const cmdReview = src.slice(src.indexOf("async function cmdReview"), src.indexOf("async function cmdImagine"));
+  // Find the try/catch around grokBaseArgs
+  const baseArgsBlock = cmdReview.slice(cmdReview.indexOf("try {"));
+  assert.match(baseArgsBlock, /try\s*{\s*fs\.unlinkSync\(promptFile\)\s*;?\s*}\s*catch\s*{\s*}/,
+    "cmdReview's grokBaseArgs catch must unlink promptFile on validation failure (v0.7.1 promptFile leak)");
+});
+
+test("v0.8.1 (Grok MED #2): cmdTask threads policy flags via extractPolicyFlags", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const cmdTask = src.slice(src.indexOf("async function cmdTask"), src.indexOf("// ----------", src.indexOf("async function cmdTask")));
+  assert.match(cmdTask, /\.\.\.extractPolicyFlags\(flags\)/,
+    "cmdTask must call extractPolicyFlags to thread --allow/--deny/--rules/etc through write-mode rescue");
+});
+
 test("capabilityProbe requires all v0.8.0 flags", () => {
   const src = fs.readFileSync(
     new URL("../plugins/grok/scripts/lib/grok.mjs", import.meta.url),

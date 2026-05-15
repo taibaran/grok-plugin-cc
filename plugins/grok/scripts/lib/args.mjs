@@ -53,7 +53,15 @@ export function parseArgs(argv, {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (!t.startsWith("--")) { positional.push(t); continue; }
-    const [rawKey, inline] = t.slice(2).split("=", 2);
+    // v0.8.1 (Codex P3): split on FIRST `=` only. The old code used
+    // `t.slice(2).split("=", 2)` which silently DROPS any tokens
+    // beyond the second array slot — so `--system-prompt-override=Use A=B`
+    // became `{ rawKey: "system-prompt-override", inline: "Use A" }`,
+    // losing the trailing "=B". Find the first equals, slice both sides.
+    const stripped = t.slice(2);
+    const eqIdx = stripped.indexOf("=");
+    const rawKey = eqIdx < 0 ? stripped : stripped.slice(0, eqIdx);
+    const inline = eqIdx < 0 ? undefined : stripped.slice(eqIdx + 1);
     if (boolFlags.has(rawKey)) {
       flags[rawKey] = inline === undefined ? true : inline !== "false";
       continue;
@@ -94,8 +102,11 @@ export const COMMON_BOOL_FLAGS = new Set([
   // v0.8.0 Grok CLI bool kill-switches
   "no-subagents",         // --no-subagents: forbid grok from spawning its own subagents
   "no-plan",              // --no-plan: skip the planning turn
-  "verbatim",             // --verbatim: send the prompt exactly as given (no plugin rewriting)
-  "restore-code"          // --restore-code: checkout the original session commit on resume
+  "verbatim"              // --verbatim: send the prompt exactly as given (no plugin rewriting)
+  // v0.8.1: --restore-code was here but not wired through grokBaseArgs /
+  // extractPolicyFlags / capabilityProbe. Removed (Grok aggregate-review
+  // round-2 HIGH). Will be re-added in v0.9.0 alongside --continue /
+  // --resume / --session-id when the resume path is built.
 ]);
 
 export const COMMON_VALUE_FLAGS = new Set([

@@ -201,7 +201,14 @@ export function capabilityProbe() {
     "--permission-mode",
     "--max-turns",
     "--disallowed-tools",
-    "--prompt-file"
+    "--prompt-file",
+    // v0.6.0 — flags required by /grok:research, /grok:best-of, /grok:models.
+    // Grok review nit-G1: probe used to pass on pre-0.6 grok binaries, then
+    // research/best-of failed at runtime with "unknown option".
+    "--effort",
+    "--check",
+    "--best-of-n",
+    "--disable-web-search"
   ];
   const missing = required.filter(token => !help.includes(token));
   return { ok: missing.length === 0, missing };

@@ -74,6 +74,7 @@ export const COMMON_BOOL_FLAGS = new Set([
   "enable-review-gate", "disable-review-gate",
   // v0.6.0 Grok-specific differentiator flags
   "check",                // --check: self-verification loop (headless)
+  "no-check",             // --no-check: explicit opt-out (matters for commands where --check defaults to on, e.g. /grok:research)
   "no-web-search",        // --no-web-search: turn OFF default web search
   "set-default"           // /grok:models --set-default: persist activeModel
 ]);

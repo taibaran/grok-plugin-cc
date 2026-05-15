@@ -5,6 +5,81 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-15
+
+Three Grok-specific differentiator commands plus refactor of the headless
+dispatcher. Four independent reviewers (Claude / Codex / Gemini / Grok)
+audited; two real bugs found by Grok and five nits found by Claude general
+all landed in this release.
+
+### New commands
+
+- **`/grok:research <question>`** — deep research mode. Defaults: `--effort max`
+  + `--check` self-verification loop + live web search ON. Override hooks:
+  `--effort low|medium|high|xhigh|max`, `--no-check`, `--no-web-search`.
+
+- **`/grok:models [--set-default <id>]`** — wraps `grok models`. With
+  `--set-default <id>` (or `--set-default` followed by a positional id),
+  persists the model into the workspace `activeModel` config. Footer shows
+  the four-tier precedence: per-call `--model` > `GROK_PLUGIN_MODEL` env
+  > workspace `activeModel` > plugin `DEFAULT_MODEL`.
+
+- **`/grok:best-of <N> <prompt>`** — wraps `grok --best-of-n N`. Grok runs
+  the prompt N ways in parallel and returns its best answer. Plugin caps
+  N at `BEST_OF_N_MAX = 8` (each branch is full token-spend; the cap
+  prevents accidental N=50 runs). Two argv forms accepted:
+  `best-of 3 <prompt>` and `best-of --best-of-n 3 <prompt>`.
+
+### Bug fixes from reviewer round
+
+- **G1. Capability probe didn't verify v0.6.0 flags** (`lib/grok.mjs`).
+  `capabilityProbe()` checked the v0.4.0-era core flags only. On a pre-0.6
+  `grok` binary, `/grok:setup` would have reported green while
+  `/grok:research` then failed at runtime with "unknown option: --effort".
+  Required list now includes `--effort`, `--check`, `--best-of-n`,
+  `--disable-web-search`. (Grok review.)
+
+### Refactors
+
+- **`runHeadlessGrok` extracted** (`companion.mjs`). The ~30-line tail
+  (spawn → ETIMEDOUT handling → `parseGrokJson` dispatch → auth-hint
+  emission → exit-code mapping) used to be copy-pasted across `cmdAsk`,
+  `cmdResearch`, and `cmdBestOf`. v0.5.0's `[hint: ...]` lines would
+  have only landed in one of three callers if not for this. Single
+  source of truth now. (Claude general review nit-1.)
+
+- **`bestof` → `best-of`** (`companion.mjs`, `commands/best-of.md`).
+  Matches the hyphenated multi-word convention from `imagine-video` /
+  `adversarial-review`. (Claude general review nit-2.)
+
+- **`--no-check` flag for `/grok:research`** (`lib/args.mjs`,
+  `companion.mjs`). Research mode defaults `--check` on; previously
+  no documented way to disable. Now `--no-check` mirrors the
+  `--no-web-search` shape. (Claude general review nit-5.)
+
+### Tests
+
+- 26 new behavior tests in `tests/v0-6-0-features.test.mjs`, totaling 187
+  passing across the suite. Coverage now includes: `grokBaseArgs`
+  validators (effort whitelist, best-of-n cap, integer checks);
+  `parseArgs` end-to-end recognition of `--no-check`, `--no-web-search`,
+  `--best-of-n=N` inline form; cmdResearch default-flag composition;
+  `--no-check` and `--no-web-search` round-trip through the full argv
+  build chain; cmdBestOf dual-form parsing; `setActiveModel` →
+  `readConfig` round-trip; `runHeadlessGrok` extraction sanity.
+
+### Known gaps (deferred from this release)
+
+Grok review surfaced five missing Grok-CLI features the plugin doesn't
+yet expose. Tracking for follow-up patches:
+
+- `--sandbox <profile>` — kernel-level fs/net isolation (Grok's distinct
+  security boundary vs. Claude/Codex/Gemini).
+- `--worktree` — first-class git-worktree session isolation.
+- Memory controls — `--no-memory` / `--experimental-memory`.
+- Session resume — `--continue` / `--resume` from headless commands.
+- MCP surface — `grok mcp` subcommands for managing external tool servers.
+
 ## [0.5.0] - 2026-05-15
 
 Comprehensive 4-reviewer round (Claude / Codex / Gemini / Grok) surfaced

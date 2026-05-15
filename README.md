@@ -59,6 +59,9 @@ prints `Grok plugin is ready.`, you can use any of the commands below.
 | `/grok:ask <question>` | Ask Grok a one-off question (read-only). |
 | `/grok:review` | Review uncommitted changes (working-tree, staged, or branch diff). Foreground or background. |
 | `/grok:adversarial-review` | Like `/grok:review`, but the prompt tells Grok to challenge the design and surface failure modes. |
+| `/grok:research <question>` | Deep research with Grok — `--effort max` + `--check` self-verification loop + live web search enabled by default. |
+| `/grok:models [--set-default <id>]` | List Grok models via `grok models`; optionally pin the workspace default. |
+| `/grok:best-of <N> <prompt>` | Run a prompt N ways in parallel (`grok --best-of-n N`, capped at 8) and return Grok's best answer. |
 | `/grok:imagine <description>` | Generate an image from text using Grok Imagine. Returns the saved file path. |
 | `/grok:imagine-video <description>` | Generate a video from text using Grok Imagine. Returns the saved file path. |
 | `/grok:rescue <task>` | Delegate investigation, debugging, or a substantial task to Grok via the `grok-rescue` subagent. |

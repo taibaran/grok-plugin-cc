@@ -274,30 +274,36 @@ function cmdSetup({ flags }) {
 // AND in stop-review-gate-hook.mjs::parseGrokJsonEnvelope). Imported
 // above. The two-parser drift Codex flagged is closed.
 
-function cmdAsk({ flags, positional }) {
-  const prompt = positional.join(" ").trim();
-  if (!prompt) {
-    console.error("Usage: ask <question>");
-    process.exit(2);
-  }
-  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_ASK_TIMEOUT_MS);
-  const effort = validateEffort(flags.effort);
-  if (!which("grok")) {
-    console.error("Grok CLI not installed. Run `/grok:setup`.");
-    process.exit(127);
-  }
-  // Always request json output internally so we can detect Grok's
-  // exit-0-on-internal-error case and surface a clean error.
-  const args = ["-p", prompt, ...grokBaseArgs({ readOnly: true, model: flags.model, jsonOutput: true })];
-  args.push("--max-turns", String(DEFAULT_ASK_MAX_TURNS));
-  if (effort) args.push("--effort", effort);
+// ---------- shared headless dispatcher (v0.6.0 refactor) ----------
+//
+// cmdAsk, cmdResearch, and cmdBestOf used to each carry their own ~30-line
+// copy of this exact block. Claude general v0.6.0 review nit-1 flagged the
+// drift risk — when v0.5.0 added the `[hint: ...]` lines after stderr, it
+// would only have propagated to one of three callers. Centralizing here
+// makes the policy uniform.
+//
+// Contract: spawn grok with `args`, sanitize all output, classify auth
+// failures, and process.exit() with an appropriate code. The function
+// does NOT return — every code path ends in process.exit. Callers must
+// not put work after the call.
+//
+//   args         — full argv to pass to `grok` (no leading binary).
+//   timeoutMs    — child-process timeout. 0 means no Node-level timeout.
+//                  Always clamped to MAX_SETTIMEOUT_MS.
+//   label        — short word for the timeout error message ("ask",
+//                  "research", "best-of"). Surfaces in user-facing text.
+//   timeoutHint  — optional second sentence after the timeout line.
+//                  cmdAsk / cmdResearch use this to suggest alternate
+//                  --timeout values; cmdBestOf passes "" (no hint).
+function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
   const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
   if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
   const r = spawnSync("grok", args, spawnOpts);
   if (r.error && r.error.code === "ETIMEDOUT") {
     if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
     if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
-    process.stderr.write(`\n[grok-plugin] ask timed out after ${timeoutMs}ms. Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 15m.\n`);
+    const hintSuffix = timeoutHint ? ` ${timeoutHint}` : "";
+    process.stderr.write(`\n[grok-plugin] ${label} timed out after ${timeoutMs}ms.${hintSuffix}\n`);
     process.exit(EXIT_TIMEOUT);
   }
   const parsed = parseGrokJson(r.stdout || "");
@@ -319,6 +325,29 @@ function cmdAsk({ flags, positional }) {
     if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
   }
   process.exit(r.status ?? 0);
+}
+
+function cmdAsk({ flags, positional }) {
+  const prompt = positional.join(" ").trim();
+  if (!prompt) {
+    console.error("Usage: ask <question>");
+    process.exit(2);
+  }
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_ASK_TIMEOUT_MS);
+  const effort = validateEffort(flags.effort);
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  // Always request json output internally so we can detect Grok's
+  // exit-0-on-internal-error case and surface a clean error.
+  const args = ["-p", prompt, ...grokBaseArgs({ readOnly: true, model: flags.model, jsonOutput: true })];
+  args.push("--max-turns", String(DEFAULT_ASK_MAX_TURNS));
+  if (effort) args.push("--effort", effort);
+  runHeadlessGrok({
+    args, timeoutMs, label: "ask",
+    timeoutHint: "Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 15m."
+  });
 }
 
 // ---------- shared job runner ----------
@@ -1109,11 +1138,18 @@ function cmdResearch({ flags, positional }) {
     console.error("Grok CLI not installed. Run `/grok:setup`.");
     process.exit(127);
   }
-  // Research-mode defaults: effort=max, check=true. User can override
-  // either via flags. Web-search defaults to ON; pass --no-web-search to
-  // disable.
+  // Research-mode defaults: effort=max, check=true, web-search ON.
+  // Override hooks:
+  //   --effort <level>     overrides effort (validated by EFFORT_LEVELS in grokBaseArgs)
+  //   --no-check           explicit opt-out of self-verification loop
+  //                        (Claude general v0.6.0 review nit-5: argument-hint
+  //                        previously didn't expose a way to disable --check;
+  //                        --no-check now mirrors --no-web-search.)
+  //   --no-web-search      turn off Grok's built-in live search
   const effortRaw = flags.effort != null ? flags.effort : "max";
-  const checkFlag = flags.check === false ? false : true;
+  const checkFlag = flags["no-check"] ? false
+                 : flags.check === false ? false
+                 : true;
   const disableWebSearch = !!flags["no-web-search"];
   let baseArgs;
   try {
@@ -1130,33 +1166,10 @@ function cmdResearch({ flags, positional }) {
     process.exit(2);
   }
   const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_RESEARCH_MAX_TURNS)];
-  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
-  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
-  const r = spawnSync("grok", args, spawnOpts);
-  if (r.error && r.error.code === "ETIMEDOUT") {
-    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
-    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
-    process.stderr.write(`\n[grok-plugin] research timed out after ${timeoutMs}ms. Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 1h.\n`);
-    process.exit(EXIT_TIMEOUT);
-  }
-  const parsed = parseGrokJson(r.stdout || "");
-  if (parsed.kind === "text") {
-    process.stdout.write(parsed.text + "\n");
-    process.exit(0);
-  }
-  if (parsed.kind === "error") {
-    const why = classifyAuthBlob(parsed.message);
-    process.stderr.write(`Grok error: ${parsed.message}\n`);
-    if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
-    process.exit(1);
-  }
-  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
-  if (r.status !== 0) {
-    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
-    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
-    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
-  }
-  process.exit(r.status ?? 0);
+  runHeadlessGrok({
+    args, timeoutMs, label: "research",
+    timeoutHint: "Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 1h."
+  });
 }
 
 // ---------- v0.6.0: /grok:models ----------
@@ -1234,11 +1247,11 @@ function cmdBestOf({ flags, positional }) {
     n = positional[0];
     prompt = positional.slice(1).join(" ").trim();
   } else {
-    console.error("Usage: bestof <N> <prompt>  (or: bestof --best-of-n <N> <prompt>)");
+    console.error("Usage: best-of <N> <prompt>  (or: best-of --best-of-n <N> <prompt>)");
     process.exit(2);
   }
   if (!prompt) {
-    console.error("Usage: bestof <N> <prompt>");
+    console.error("Usage: best-of <N> <prompt>");
     process.exit(2);
   }
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_BESTOF_TIMEOUT_MS);
@@ -1265,39 +1278,13 @@ function cmdBestOf({ flags, positional }) {
     process.exit(2);
   }
   const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_BESTOF_MAX_TURNS)];
-  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
-  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
-  const r = spawnSync("grok", args, spawnOpts);
-  if (r.error && r.error.code === "ETIMEDOUT") {
-    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
-    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
-    process.stderr.write(`\n[grok-plugin] bestof timed out after ${timeoutMs}ms.\n`);
-    process.exit(EXIT_TIMEOUT);
-  }
-  const parsed = parseGrokJson(r.stdout || "");
-  if (parsed.kind === "text") {
-    process.stdout.write(parsed.text + "\n");
-    process.exit(0);
-  }
-  if (parsed.kind === "error") {
-    const why = classifyAuthBlob(parsed.message);
-    process.stderr.write(`Grok error: ${parsed.message}\n`);
-    if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
-    process.exit(1);
-  }
-  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
-  if (r.status !== 0) {
-    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
-    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
-    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
-  }
-  process.exit(r.status ?? 0);
+  runHeadlessGrok({ args, timeoutMs, label: "best-of", timeoutHint: "" });
 }
 
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|bestof|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
@@ -1317,14 +1304,14 @@ async function main() {
     case "task": return await cmdTask(args);
     case "research": return cmdResearch(args);
     case "models": return cmdModels(args);
-    case "bestof": return cmdBestOf(args);
+    case "best-of": return cmdBestOf(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
     case "cancel": return await cmdCancel(args);
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|bestof|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

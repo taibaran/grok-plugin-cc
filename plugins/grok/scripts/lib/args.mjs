@@ -76,7 +76,8 @@ export const COMMON_BOOL_FLAGS = new Set([
   "check",                // --check: self-verification loop (headless)
   "no-check",             // --no-check: explicit opt-out (matters for commands where --check defaults to on, e.g. /grok:research)
   "no-web-search",        // --no-web-search: turn OFF default web search
-  "set-default"           // /grok:models --set-default: persist activeModel
+  "set-default",          // /grok:models --set-default: persist activeModel
+  "adversarial"           // /grok:aggregate-review --adversarial: switch all reviewers to adversarial template
 ]);
 
 export const COMMON_VALUE_FLAGS = new Set([

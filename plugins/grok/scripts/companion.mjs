@@ -1381,38 +1381,59 @@ function cmdBestOf({ flags, positional }) {
 
 const DEFAULT_AGG_TIMEOUT_MS = 10 * 60 * 1000;   // 10m per reviewer
 
+// In-memory buffer cap per reviewer. v0.7.0 round-2 aggregate-review-self
+// review (all three reviewers concurred): `stdout += d; stderr += d;` with no
+// bound risked OOM on a verbose / runaway reviewer. 16 MiB is generous for
+// any legitimate review answer while bounding heap pressure.
+const MAX_REVIEWER_BUF = 16 * 1024 * 1024;
+
 const AGG_REVIEWERS = [
   {
     name: "codex",
     label: "Codex (OpenAI)",
     detect: () => which("codex"),
-    buildCmd: ({ promptFile }) => ({
+    // Codex reads from stdin when --skip-git-repo-check is set; the
+    // existing `task` command path uses the same trick. No ARG_MAX risk.
+    buildCmd: ({ promptText }) => ({
       cmd: "codex",
       args: ["exec", "--skip-git-repo-check"],
-      stdin: fs.readFileSync(promptFile, "utf8")
+      stdin: promptText,
+      isPlainText: true
     })
   },
   {
     name: "gemini",
     label: "Gemini (Google)",
     detect: () => which("gemini"),
+    // v0.7.0 round-2 (3/3 reviewers agreed): passing the full multi-MB
+    // prompt as `-p <inline>` is ARG_MAX-unsafe and crashes on real-world
+    // diffs. Gemini supports `-p "" + stdin`: when -p is empty and stdin
+    // has content, the stdin becomes the prompt body. Empirically verified.
     buildCmd: ({ promptText }) => ({
       cmd: "gemini",
-      args: ["--skip-trust", "--approval-mode", "plan", "-p", promptText],
-      stdin: null
+      args: ["--skip-trust", "--approval-mode", "plan", "-p", ""],
+      stdin: promptText,
+      isPlainText: true
     })
   },
   {
     name: "grok",
     label: "Grok (xAI)",
     detect: () => which("grok"),
-    buildCmd: ({ promptText, model }) => ({
+    // v0.7.0 round-2 (3/3 reviewers agreed): grok refuses `-p ""`
+    // ("prompt is empty") so stdin is not viable. Use --prompt-file like
+    // /grok:review already does for multi-MB diffs. The temp file is
+    // created above (writePromptToTempFile with O_EXCL) and unlinked
+    // after the spawn resolves.
+    buildCmd: ({ promptFile, model }) => ({
       cmd: "grok",
       args: [
-        "-p", promptText,
-        ...grokBaseArgs({ readOnly: true, model, jsonOutput: false })
+        "--prompt-file", promptFile,
+        ...grokBaseArgs({ readOnly: true, model, jsonOutput: false }),
+        "--max-turns", "60"
       ],
-      stdin: null
+      stdin: null,
+      isPlainText: true
     })
   }
 ];
@@ -1438,36 +1459,103 @@ function spawnReviewer(spec, common) {
   return new Promise(resolve => {
     const buildResult = spec.buildCmd(common);
     const started = Date.now();
-    const proc = spawn(buildResult.cmd, buildResult.args, {
-      stdio: [buildResult.stdin == null ? "ignore" : "pipe", "pipe", "pipe"],
-      env: cleanGrokEnv()
-    });
+    let proc;
+    try {
+      proc = spawn(buildResult.cmd, buildResult.args, {
+        stdio: [buildResult.stdin == null ? "ignore" : "pipe", "pipe", "pipe"],
+        env: cleanGrokEnv()
+      });
+    } catch (err) {
+      // v0.7.0 round-2 (Gemini + Grok): spawn() can throw synchronously
+      // (e.g., E2BIG with `-p <huge>` before the ARG_MAX fix, ENOENT
+      // racing with which(), or fd-exhaustion). Both reviewers flagged
+      // that the missing handler would crash the entire companion.
+      resolve({
+        name: spec.name, label: spec.label,
+        exitCode: -1, elapsedMs: Date.now() - started,
+        timedOut: false, errored: true,
+        output: "",
+        stderr: `spawn-throw: ${err.code || err.message}`,
+        verdict: "SPAWN_ERROR", blocking: 0, nits: 0
+      });
+      return;
+    }
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0, stderrBytes = 0;
+    let stdoutTruncated = false, stderrTruncated = false;
     let timedOut = false;
+    let errored = false;
     proc.stdout.setEncoding("utf8");
     proc.stderr.setEncoding("utf8");
-    proc.stdout.on("data", d => { stdout += d; });
-    proc.stderr.on("data", d => { stderr += d; });
+    // v0.7.0 round-2 (Grok finding): cap in-memory accumulation to
+    // MAX_REVIEWER_BUF. A misbehaving reviewer flood used to grow the
+    // heap unbounded until the SIGKILL fired 10 min later.
+    proc.stdout.on("data", d => {
+      const n = Buffer.byteLength(d, "utf8");
+      if (stdoutBytes + n > MAX_REVIEWER_BUF) {
+        const remaining = MAX_REVIEWER_BUF - stdoutBytes;
+        if (remaining > 0) stdout += d.slice(0, remaining);
+        stdoutBytes = MAX_REVIEWER_BUF;
+        stdoutTruncated = true;
+        try { proc.kill("SIGKILL"); } catch {}
+        return;
+      }
+      stdout += d;
+      stdoutBytes += n;
+    });
+    proc.stderr.on("data", d => {
+      const n = Buffer.byteLength(d, "utf8");
+      if (stderrBytes + n > MAX_REVIEWER_BUF) {
+        const remaining = MAX_REVIEWER_BUF - stderrBytes;
+        if (remaining > 0) stderr += d.slice(0, remaining);
+        stderrBytes = MAX_REVIEWER_BUF;
+        stderrTruncated = true;
+        return;
+      }
+      stderr += d;
+      stderrBytes += n;
+    });
+    // v0.7.0 round-2 (Gemini + Grok): asynchronous spawn errors
+    // (post-fork failures, broken stdio, signal-before-data) emit an
+    // 'error' event. Without this listener the Node process crashes
+    // unhandled, aborting all sibling reviewers' results.
+    proc.on("error", err => {
+      errored = true;
+      stderr += `\nproc-error: ${err.code || err.message}\n`;
+    });
     if (buildResult.stdin != null) {
       proc.stdin.write(buildResult.stdin);
       proc.stdin.end();
     }
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill("SIGKILL"); } catch {}
-    }, common.timeoutMs);
+    // v0.7.0 round-2 (Codex): --timeout 0 used to install a 0ms timer
+    // that fired immediately. Match the existing job-runner pattern:
+    // only install the timer when timeoutMs > 0.
+    let timer = null;
+    if (common.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { proc.kill("SIGKILL"); } catch {}
+      }, common.timeoutMs);
+    }
     proc.on("close", code => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       const elapsedMs = Date.now() - started;
-      // Sanitize each reviewer's output before mixing into our own
-      // stdout. parseGrokJson handles grok's --output-format json case;
-      // other reviewers' plain output goes through sanitizeForTerminal.
+      // v0.7.0 round-2 (Gemini): grok in aggregate-review is invoked
+      // with `--output-format plain` (jsonOutput: false in
+      // grokBaseArgs), so the output is plain markdown. Running
+      // parseGrokJson on plain text returns kind:"unknown" and the old
+      // code then displayed "(grok internal error) " — swallowing the
+      // legitimate review output. The fix is to trust the spec.isPlainText
+      // marker: never try JSON-parsing a stream we asked for plain.
       let display = stdout;
-      if (spec.name === "grok") {
+      if (!spec.isPlainText && spec.name === "grok") {
         const parsed = parseGrokJson(stdout);
         if (parsed.kind === "text") display = parsed.text;
         else if (parsed.kind === "error") display = `(grok internal error) ${parsed.message}`;
+      }
+      if (stdoutTruncated) {
+        display += `\n\n[grok-plugin] reviewer stdout truncated at ${MAX_REVIEWER_BUF} bytes.\n`;
       }
       const cleaned = sanitizeForTerminal(display);
       resolve({
@@ -1476,6 +1564,8 @@ function spawnReviewer(spec, common) {
         exitCode: code,
         elapsedMs,
         timedOut,
+        errored,
+        truncated: stdoutTruncated || stderrTruncated,
         output: cleaned,
         stderr: sanitizeForTerminal(stderr).slice(0, 4000),
         ...parseAggVerdict(cleaned)
@@ -1555,17 +1645,45 @@ async function cmdAggregateReview({ flags, positional }) {
     }
   }
 
-  // Summary table
+  // Summary table — note Status column reflects execution health
+  // separately from verdict (v0.7.0 round-2 Codex finding: failed
+  // reviewer used to silently exit 0).
   process.stdout.write(`---\n\n## Summary\n\n`);
-  process.stdout.write(`| Reviewer | Verdict | Blocking | Nits | Time |\n`);
-  process.stdout.write(`|---|---|---|---|---|\n`);
+  process.stdout.write(`| Reviewer | Verdict | Blocking | Nits | Time | Status |\n`);
+  process.stdout.write(`|---|---|---|---|---|---|\n`);
   for (const r of results) {
-    process.stdout.write(`| ${r.label} | ${r.verdict} | ${r.blocking} | ${r.nits} | ${(r.elapsedMs/1000).toFixed(1)}s |\n`);
+    let status;
+    if (r.errored) status = "spawn-error";
+    else if (r.timedOut) status = "timeout";
+    else if (r.exitCode !== 0) status = `exit ${r.exitCode}`;
+    else if (r.verdict === "UNPARSED" || r.verdict === "NO-OUTPUT") status = r.verdict.toLowerCase();
+    else status = "ok";
+    process.stdout.write(`| ${r.label} | ${r.verdict} | ${r.blocking} | ${r.nits} | ${(r.elapsedMs/1000).toFixed(1)}s | ${status} |\n`);
   }
 
-  // Aggregate exit code: 1 if any REJECT, 0 otherwise
-  const anyReject = results.some(r => r.verdict === "REJECT");
-  process.exit(anyReject ? 1 : 0);
+  // v0.7.0 round-2 (Codex BLOCKING): exit code must reflect ANY of:
+  //   - REJECT verdict
+  //   - timeout
+  //   - non-zero reviewer exit
+  //   - spawn error
+  //   - UNPARSED / NO-OUTPUT (reviewer didn't follow the verdict contract)
+  // The old `anyReject` check silently exited 0 when a reviewer crashed
+  // or returned freeform markdown that didn't have a "VERDICT: " line —
+  // exactly what happened on the first dogfood run of /grok:aggregate-review
+  // against v0.7.0's own diff (all 3 reviewers returned UNPARSED).
+  const failed = results.filter(r =>
+    r.verdict === "REJECT" ||
+    r.verdict === "UNPARSED" ||
+    r.verdict === "NO-OUTPUT" ||
+    r.verdict === "SPAWN_ERROR" ||
+    r.timedOut ||
+    r.errored ||
+    (r.exitCode !== 0 && r.exitCode != null)
+  );
+  if (failed.length > 0) {
+    process.stdout.write(`\n**${failed.length} of ${results.length} reviewer(s) did not produce a clean APPROVE / APPROVE_WITH_NITS verdict.** See per-reviewer detail above.\n`);
+  }
+  process.exit(failed.length > 0 ? 1 : 0);
 }
 
 async function main() {

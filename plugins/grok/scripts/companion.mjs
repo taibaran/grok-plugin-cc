@@ -1890,6 +1890,56 @@ async function cmdAggregateReview({ flags, positional }) {
       adversarial: !!flags.adversarial,
       focus: focus || null
     })));
+
+    // v0.8.5 (gemini-plugin-cc#4 workaround): peer-routed gemini's
+    // `review --scope branch` is broken upstream — `git diff --
+    // <ref>...HEAD` is interpreted by git as a pathspec for a
+    // non-existent file, producing 0 bytes + exit 0 + the spurious
+    // "Nothing to review" message. When a peer reviewer returns
+    // that pattern AND our own captureDiff DID find a real diff,
+    // re-spawn with the raw CLI path (which uses our diff via
+    // --prompt-file / -p "" + stdin / etc.). This is self-healing
+    // — once gemini-plugin-cc#4 ships a fix, peer routing will
+    // produce real output and this fallback won't trigger.
+    const cliFallbacksNeeded = results
+      .map((r, i) => ({ r, i, spec: available[i].spec }))
+      .filter(({ r }) =>
+        r.via === "peer" &&
+        /Nothing to review/i.test(r.output || "") &&
+        diffResult.diff && diffResult.diff.trim().length > 0
+      );
+    if (cliFallbacksNeeded.length > 0) {
+      process.stdout.write(
+        `[grok-plugin] ${cliFallbacksNeeded.length} peer reviewer(s) returned ` +
+        `"Nothing to review" despite a real diff — retrying via raw CLI ` +
+        `(gemini-plugin-cc#4 workaround).\n\n`
+      );
+      const fallbackResults = await Promise.all(cliFallbacksNeeded.map(async ({ r, i, spec }) => {
+        // Build a CLI-mode detection. The detect() function tells us
+        // whether a CLI binary is on PATH; if not, we keep the peer
+        // result.
+        const cliPath = which(spec.name);
+        if (!cliPath) return null;
+        const newResult = await spawnReviewer(spec, {
+          detection: { kind: "cli", path: cliPath },
+          promptFile,
+          promptText: prompt,
+          model: flags.model,
+          timeoutMs,
+          base,
+          scope: scope === "auto" ? null : scope,
+          adversarial: !!flags.adversarial,
+          focus: focus || null
+        });
+        // Tag this reviewer so the report makes clear what happened.
+        newResult.via = "cli-fallback";
+        newResult.peerFallbackFrom = "peer";
+        return { i, newResult };
+      }));
+      for (const fb of fallbackResults) {
+        if (fb) results[fb.i] = fb.newResult;
+      }
+    }
   } finally {
     try { fs.unlinkSync(promptFile); } catch {}
   }

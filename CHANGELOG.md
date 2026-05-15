@@ -5,6 +5,53 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-05-15
+
+Self-healing workaround for [gemini-plugin-cc#4](https://github.com/taibaran/gemini-plugin-cc/issues/4).
+
+### Background
+
+While running `/grok:aggregate-review` repeatedly during the v0.8.x
+`/goal` loop, Gemini's verdict came back as "Nothing to review" every
+single round — even when the diff was clearly non-empty. Root cause
+(reported upstream): gemini-plugin-cc's `captureDiff` for
+`--scope branch` calls `git diff -- <ref>...HEAD`. The `--` separator
+makes git interpret the ref-range as a *pathspec* (non-existent file)
+instead of a refspec, returning 0 bytes + exit 0 + spurious "Nothing
+to review". The fallback to the no-`--` form only fires on non-zero
+exit, which never triggers.
+
+Verified: grok-plugin-cc (this repo) and openai/codex-plugin-cc do
+**not** have this bug — only gemini-plugin-cc.
+
+### What v0.8.5 does
+
+In `/grok:aggregate-review`, after collecting peer-routed results, if
+ANY peer reviewer returned a "Nothing to review" message AND our own
+`captureDiff` shows the diff is non-empty, we **re-spawn that
+reviewer with the raw CLI path** (the v0.7.0 fallback that uses our
+captured diff via `-p ""` + stdin or `--prompt-file`). The original
+peer attempt's wasted ~150ms is dwarfed by the time saved getting a
+real review.
+
+The per-reviewer detail in the report now annotates the routing path
+as `cli-fallback` instead of `peer` when this triggers, so users can
+see exactly what happened.
+
+### Self-healing semantics
+
+When gemini-plugin-cc ships a fix for #4, peer routing will produce
+real output and the "Nothing to review" check won't match → no
+fallback triggers → fast peer-plugin routing resumes. No code change
+needed on this side.
+
+### Tests
+
+- 266 passing (unchanged — the fallback is exercised end-to-end the
+  next time `/grok:aggregate-review` runs against a real diff). A
+  behavioral test with stacked fake-grok + fake-gemini + fake-codex
+  binaries would add real coverage; tracked for a future round.
+
 ## [0.8.4] - 2026-05-15
 
 `/goal` loop round-5: aggregate-review against v0.8.2 surfaced 1

@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](package.json)
+[![Release](https://img.shields.io/github/v/release/taibaran/grok-plugin-cc)](https://github.com/taibaran/grok-plugin-cc/releases)
+[![Tests](https://img.shields.io/badge/tests-339-brightgreen)](tests/)
 
 Run xAI's [Grok](https://x.ai/news/grok-build-cli) from inside a Claude Code
 session. Get a second-opinion code review, an adversarial pass that *tries* to
@@ -104,6 +106,35 @@ the friendly text format.
 Default timeouts are 5 minutes for images, 15 minutes for video; override
 with `--timeout 30m` or `--timeout 0` (disable). Content-policy refusals
 come through as plain text (no markdown link) so you can see Grok's reason.
+
+## Example: aggregate review (3-LLM consensus)
+
+`/grok:aggregate-review` fans the same diff out to codex, gemini, and
+grok in parallel and produces one consolidated report — useful when
+you want a second *and* third opinion before merging:
+
+```
+/grok:aggregate-review --scope branch --base origin/main
+```
+
+Each reviewer runs through its own plugin (`codex-plugin-cc`,
+`gemini-plugin-cc`, `grok-plugin-cc` itself) with the same diff, the
+same prompt, and the same focus hint. The aggregator parses each
+reviewer's verdict (`SHIP` / `APPROVE_WITH_NITS` / `REJECT`),
+collates blocking findings, and prints:
+
+```
+| Reviewer | Verdict | Blocking | Nits | Time | Status |
+|---|---|---|---|---|---|
+| Codex (OpenAI) | APPROVE_WITH_NITS | 0 | 2 | 24.5s | ok |
+| Gemini (Google) | SHIP | 0 | 0 | 19.7s | ok |
+| Grok (xAI) | APPROVE_WITH_NITS | 0 | 1 | 31.2s | ok |
+```
+
+Needs ≥2 of the three reviewer plugins installed (codex, gemini, or
+grok — the latter is this plugin itself, so it always counts). Each
+reviewer gets its own 10-minute timeout by default. The aggregate
+report is the same format whether you have 2 or 3 reviewers.
 
 ## Example: review vs. adversarial-review
 
@@ -306,7 +337,7 @@ grok-plugin-cc/
 │   │   ├── stop-review-gate-hook.mjs
 │   │   └── lib/                      ← state, args, git, process, render, verdict, prompts, grok
 │   └── skills/                       ← grok-cli-runtime, grok-prompting, grok-result-handling
-├── tests/                            ← 79 unit tests (node:test, no devDeps)
+├── tests/                            ← 339 tests (334 unit + 5 integration), node:test, no devDeps
 ├── .github/workflows/ci.yml          ← CI matrix Node 20/22 + smoke job
 └── package.json  README.md  LICENSE  CHANGELOG.md
 ```
@@ -331,6 +362,18 @@ local-dev and installed setups. The companion handles:
 - exit-0-on-internal-error detection (Grok returns exit 0 even on internal
   `{"type":"error"}` payloads, so the companion always parses the JSON
   envelope before deciding job status)
+
+## Stability
+
+This plugin is **stable** as of v1.0.0. The 20 command surfaces
+listed above will not break in any v1.x release; the plugin tracks
+upstream `grok` flag changes via the capability probe so a new Grok
+release that renames a flag surfaces a clear error from `/grok:setup`
+rather than a confusing runtime failure.
+
+Internal helpers (the dispatcher, the session-trust logic, ANSI
+sanitizer, TOCTOU helpers) are not part of the public surface and
+may continue to evolve.
 
 ## License
 

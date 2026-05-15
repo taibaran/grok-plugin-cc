@@ -21,12 +21,13 @@ the resulting code surface is what ships as v1.0.0.
 20 slash commands wrapping the official xAI Grok CLI
 (github.com/xai-org, x.ai/cli):
 
-- `/grok:ask`, `/grok:task`, `/grok:research`, `/grok:rescue`
+- `/grok:ask`, `/grok:research`, `/grok:rescue`
 - `/grok:review`, `/grok:adversarial-review`, `/grok:aggregate-review`
 - `/grok:imagine`, `/grok:imagine-video`
-- `/grok:best-of-n`, `/grok:model`
+- `/grok:best-of`, `/grok:models`
 - `/grok:worktree`, `/grok:sessions`, `/grok:memory`, `/grok:mcp`
-- `/grok:sandbox`, `/grok:status`, `/grok:cancel`, `/grok:result`
+- `/grok:inspect`, `/grok:status`, `/grok:result`, `/grok:cancel`,
+  `/grok:purge`
 - `/grok:setup`
 
 ### Security baseline (v1.0.0)

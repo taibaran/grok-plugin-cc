@@ -51,7 +51,23 @@ export function stateDir(cwd = process.cwd()) {
 
 export function jobsDir(cwd) { return path.join(stateDir(cwd), JOBS_DIR_NAME); }
 
-export function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
+// Create a directory with strict owner-only permissions.
+//
+// Gemini round-8 finding: O_NOFOLLOW on the leaf only prevents the FINAL
+// path component from being a symlink. An attacker who can write into
+// the parent directory can swap `jobs/` itself for a symlink to `/etc/`
+// — then opening `jobs/shadow` follows the parent symlink and yields
+// `/etc/shadow` (the leaf `shadow` IS a regular file, so O_NOFOLLOW is
+// happy). Mode 0700 on jobsDir + stateDir prevents that swap: only the
+// owning user can rename or replace the directory entries inside.
+//
+// We use `{ recursive: true }` for ergonomics (creates the full chain)
+// and `chmodSync` after creation because `mkdirSync`'s `mode` is masked
+// by the process umask on some platforms.
+export function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+  try { fs.chmodSync(p, 0o700); } catch {}
+}
 
 // ---------- jobs ----------
 
@@ -198,16 +214,23 @@ export function safeJobLogPath(p, cwd) {
 // Defenses layered here (all on a SINGLE fd, no path-string races):
 //   1. safeJobLogPath confines the path string to jobsDir.
 //   2. `O_NOFOLLOW` on the open() call: open fails with ELOOP if the
-//      leaf is a symlink at open time. An attacker who plants a symlink
+//      LEAF is a symlink at open time. An attacker who plants a symlink
 //      AFTER safeJobLogPath returns cannot win this race — they would
 //      have to win the kernel-internal open syscall.
 //   3. `fstatSync(fd)` verifies the opened inode is a regular file
 //      (not a directory, device, fifo, etc.).
-//   4. Read at most `maxBytes` from offset 0 of that exact fd.
+//   4. **Realpath-on-fd verification** (Gemini round-8 finding):
+//      O_NOFOLLOW only guards the leaf. An attacker who swaps the
+//      parent `jobs/` directory itself for a symlink to `/etc/` opens
+//      `/etc/shadow` because the leaf `shadow` IS a regular file. We
+//      resolve the opened fd via /dev/fd/<N> (or /proc/self/fd/<N>
+//      on Linux) and confirm the realpath lives under the realpath of
+//      jobsDir. Combined with 0700 permissions on jobsDir from
+//      `ensureDir`, this closes the directory-swap bypass.
+//   5. Read at most `maxBytes` from offset 0 of that exact fd.
 //
 // Returns the file content (with a truncation marker if it exceeds
-// maxBytes), or null if any safety check failed. Gemini round-7
-// finding (v0.5.0).
+// maxBytes), or null if any safety check failed.
 export function readBoundedJobLog(filePath, cwd, maxBytes = MAX_JOB_LOG_READ_BYTES) {
   const safe = safeJobLogPath(filePath, cwd);
   if (!safe) return null;
@@ -222,6 +245,51 @@ export function readBoundedJobLog(filePath, cwd, maxBytes = MAX_JOB_LOG_READ_BYT
   try {
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return null;
+
+    // Defense layer 4: verify that the fd we opened actually lives
+    // inside jobsDir, not a parent-directory-swapped symlink target.
+    //
+    // On Linux, /proc/self/fd/<N> resolves via the kernel's open-file
+    // table — race-free, cannot be retargeted by an attacker who has
+    // already lost the open() race.
+    //
+    // On macOS, /dev/fd/<N> is a separate fdesc filesystem that
+    // resolves to `/dev/fd/<filename>` rather than the real path, so
+    // this check is non-functional there. We try /proc/self/fd first
+    // (Linux), fall back to /dev/fd (other platforms), then verify
+    // the resolved path starts with /dev/fd/ — if it does, the
+    // platform doesn't support fd-realpath and we fall back to
+    // layers 1-3 + the 0700 permissions on jobsDir from ensureDir.
+    //
+    // The 0700 permissions are the actual cross-platform defense:
+    // they prevent any other UID from manipulating the directory
+    // tree, which is the only way a parent-dir swap can happen
+    // without already-equivalent privileges to read the target file
+    // directly.
+    let fdRealPath = null;
+    for (const prefix of ["/proc/self/fd/", "/dev/fd/"]) {
+      try {
+        const candidate = fs.realpathSync.native(prefix + fd);
+        if (!candidate.startsWith("/dev/fd/")) {
+          fdRealPath = candidate;
+          break;
+        }
+      } catch {}
+    }
+    if (fdRealPath) {
+      let realJobsDir;
+      try { realJobsDir = fs.realpathSync.native(jobsDir(cwd)); }
+      catch { return null; }
+      if (!fdRealPath.startsWith(realJobsDir + path.sep)) {
+        return null;
+      }
+    }
+    // If neither /proc/self/fd nor a real /dev/fd was available
+    // (macOS fdesc returns /dev/fd/<filename>), we rely on the
+    // 0700-mode jobsDir + O_NOFOLLOW leaf protection. An attacker who
+    // can write into a 0700 user-owned directory already has
+    // user-equivalent access and a more direct attack vector.
+
     if (st.size === 0) return "";
     const cap = Math.min(st.size, maxBytes);
     const buf = Buffer.alloc(cap);

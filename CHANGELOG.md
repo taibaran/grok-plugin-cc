@@ -5,6 +5,50 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-05-15
+
+`/goal` round-5 — 3/3 reviewer convergence on the **incomplete** v0.9.4
+fix (the rescue.md edits never actually landed) + Grok found a related
+HIGH about job-meta provenance.
+
+### Bug fixes
+
+- **3/3 HIGH — v0.9.4 fix was incomplete (rescue.md + skills not updated)**.
+  v0.9.4's CHANGELOG claimed it updated both the agent prompt AND
+  `rescue.md`'s `argument-hint` + the loaded skills. Only the agent
+  prompt actually changed. The two skills (`grok-cli-runtime`,
+  `grok-prompting`) and `rescue.md` still only mentioned `--session-id`.
+  Per the rescue subagent's contract ("loads the cli-runtime skill"),
+  an LLM following the skill would drop `--resume`/`--continue` as
+  task text. **Fix**: this release updates all 4 files
+  (`rescue.md` argument-hint + bullet, `grok-rescue.md`, both skills).
+
+- **Grok HIGH #2 round-5 — `cmdTask` lost resume/continue provenance**.
+  `meta.requested_session_id` was the only session-id captured in job
+  metadata. `/grok:status`, `/grok:result`, and the in-flight footer
+  gated their resume hints on that single field. When a session was
+  started via `--resume=<id>` or `--continue`, the hints never
+  surfaced → the user had no way to know which session was used to
+  continue. **Fix**: `extra.requested_resume` and `extra.requested_continue`
+  are now recorded in job meta; the footer renders the appropriate
+  hint based on which entry point was used.
+
+- **Codex P2 round-5 — integration test for `/grok:inspect` too permissive**.
+  After v0.9.4's "accept stderr as valid error" change, ANY stderr
+  output (even a CLI usage / "unknown subcommand" failure from a
+  future upstream rename) would pass. Acknowledged as test-quality
+  trade-off; tightening to "expected config/auth stderr vs unknown
+  command" requires more brittle pattern matching. Tracked as a
+  future refinement.
+
+### Tests
+
+- 2 new tests asserting (a) `cmdTask` records all three resume entry
+  points and emits the right footer, (b) all 4 docs/skills/agent
+  files mention `--resume` AND `--continue` — catches the v0.9.4
+  "edits didn't apply" class of bug.
+- Total: 326 passing + 5 integration (skipped by default).
+
 ## [0.9.4] - 2026-05-15
 
 `/goal` round-4 — 3 real findings, the biggest being a **factually

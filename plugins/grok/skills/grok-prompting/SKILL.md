@@ -46,9 +46,9 @@ A good rescue prompt for Grok is short, direct, and grounded:
 
 ## Session continuity
 
-If the user mentions continuing or extending a prior Grok session, look for a session id they may have named (`-s critique-pr-123`) or seen earlier in the conversation. Pass it through as `--session-id <id>`. Grok creates a new session under that name if it does not yet exist, or resumes it if it does — so the user can chain rescue calls by reusing the same name.
+If the user mentions continuing or extending a prior Grok session, look for a session id they may have named (`-s critique-pr-123`) or seen earlier in the conversation. Pass it through as `--session-id <id>` (creates-if-missing semantics), or `--resume=<id>` (Grok-native resume of an existing session), or `--continue` (resume the most-recent session for cwd). All three are passthrough runtime controls handled by `extractPolicyFlags` and emitted as the corresponding grok CLI flag.
 
-Note: in plain-output mode the companion does not extract Grok's internal `sessionId` from the response stream, so the trailing footer in `task`'s output only includes the session id when the user supplied one via `--session-id`. If you need a stable handle for resumption, recommend the user pass `--session-id <name>` themselves.
+Note: in plain-output mode the companion does not extract Grok's internal `sessionId` from the response stream, so the trailing footer in `task`'s output only includes the session id when the user supplied one via `--session-id`, `--resume=<id>`, or `--continue`. If you need a stable handle for resumption, recommend the user pass `--session-id <name>` themselves.
 
 ## Write mode
 

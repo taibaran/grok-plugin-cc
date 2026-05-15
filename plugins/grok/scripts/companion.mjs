@@ -1076,6 +1076,10 @@ async function cmdTask({ flags, positional }) {
   // the slash-command surface; here, just thread it through.
   if (flags["session-id"]) args.push("-s", String(flags["session-id"]));
 
+  // v0.9.5 (Grok HIGH #2 round-5): also record --resume and --continue
+  // provenance so /grok:status, /grok:result, and the in-flight footer
+  // can surface the resume hint even when the session was started via
+  // those flags rather than --session-id.
   const meta = buildJobMeta({
     kind: "task",
     args,
@@ -1084,7 +1088,9 @@ async function cmdTask({ flags, positional }) {
       write: isWrite,
       model: flags.model || null,
       effort: effort || null,
-      requested_session_id: flags["session-id"] || null
+      requested_session_id: flags["session-id"] || null,
+      requested_resume: flags.resume != null ? flags.resume : null,
+      requested_continue: !!flags.continue
     }
   });
 
@@ -1103,8 +1109,18 @@ async function cmdTask({ flags, positional }) {
   // for streaming UX, so parseGrokJson returns "unknown" and never records
   // a sessionId. Showing a half-truth footer ("Session: <id>") that the
   // user can't actually `grok -r <id>` is worse than no footer at all.
+  // v0.9.5: surface session provenance for any of the three resume
+  // entry points. Order: explicit --session-id > --resume=<id> >
+  // --resume (bare) > --continue. The footer text differs because
+  // --session-id has a known id; --resume bare and --continue don't.
   if (meta.requested_session_id) {
-    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: /grok:rescue --resume=${meta.requested_session_id}  or  grok -r ${meta.requested_session_id})\n`);
+    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: /grok:rescue --session-id=${meta.requested_session_id}  or  grok -r ${meta.requested_session_id})\n`);
+  } else if (typeof meta.requested_resume === "string") {
+    process.stdout.write(`[grok-plugin] Resumed Grok session: ${meta.requested_resume}  (continue: /grok:rescue --resume=${meta.requested_resume}  or  grok -r ${meta.requested_resume})\n`);
+  } else if (meta.requested_resume === true) {
+    process.stdout.write(`[grok-plugin] Resumed most-recent Grok session (continue: /grok:rescue --resume  or  grok -r)\n`);
+  } else if (meta.requested_continue) {
+    process.stdout.write(`[grok-plugin] Continued most-recent Grok session (--continue)  (next: /grok:rescue --continue)\n`);
   }
   process.stdout.write(`[grok-plugin] /grok:result ${meta.id}\n`);
   if (result.timedOut) process.exit(EXIT_TIMEOUT);

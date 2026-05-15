@@ -162,6 +162,49 @@ test("v0.9.1: --worktree=false treats as bool false", () => {
   assert.equal(r.flags.worktree, false);
 });
 
+test("v0.9.5 (Grok HIGH #2 round-5): cmdTask records resume/continue provenance in job meta", () => {
+  // Grok HIGH round-5: v0.9.4 advertised /grok:rescue --resume=<id>
+  // but cmdTask only recorded `requested_session_id` in job meta —
+  // the footer hint never surfaced when the session was started via
+  // --resume or --continue.
+  // v0.9.5 added requested_resume + requested_continue to the extra
+  // block. Verify the source-shape (behavioral test would require
+  // a fake-grok task spawn which is heavier than warranted here).
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const cmdTask = src.slice(src.indexOf("async function cmdTask"), src.indexOf("// ----------", src.indexOf("async function cmdTask")));
+  assert.match(cmdTask, /requested_resume:\s*flags\.resume/);
+  assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
+  // And the footer surfaces all three entry points.
+  assert.match(cmdTask, /typeof meta\.requested_resume === "string"/);
+  assert.match(cmdTask, /meta\.requested_continue/);
+});
+
+test("v0.9.5 (3/3 round-5): rescue command + skills + agent all mention --resume / --continue", () => {
+  const rescueMd = fs.readFileSync(
+    new URL("../plugins/grok/commands/rescue.md", import.meta.url),
+    "utf8"
+  );
+  const agentMd = fs.readFileSync(
+    new URL("../plugins/grok/agents/grok-rescue.md", import.meta.url),
+    "utf8"
+  );
+  const skillRuntime = fs.readFileSync(
+    new URL("../plugins/grok/skills/grok-cli-runtime/SKILL.md", import.meta.url),
+    "utf8"
+  );
+  const skillPrompting = fs.readFileSync(
+    new URL("../plugins/grok/skills/grok-prompting/SKILL.md", import.meta.url),
+    "utf8"
+  );
+  // All four files must mention --resume + --continue per Grok HIGH #1
+  // round-5: the v0.9.4 fix was incomplete because rescue.md and the
+  // two skills were not updated alongside the agent prompt.
+  for (const [name, content] of [["rescue.md", rescueMd], ["grok-rescue.md", agentMd], ["grok-cli-runtime/SKILL.md", skillRuntime], ["grok-prompting/SKILL.md", skillPrompting]]) {
+    assert.match(content, /--resume/, `${name} must mention --resume`);
+    assert.match(content, /--continue/, `${name} must mention --continue`);
+  }
+});
+
 test("v0.9.2 (3/3 round-2): top-level dispatch does NOT enable short aliases (prompt safety)", () => {
   // v0.9.1 enabled short aliases globally → `/grok:ask explain grep
   // -r foo` set resume=true and dropped foo. v0.9.2 (Codex P2 #2 +

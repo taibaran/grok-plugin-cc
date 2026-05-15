@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Grok rescue subagent
-argument-hint: '[--background|--wait] [--write|--read-only] [--model <model>] [--effort <low|medium|high|xhigh|max>] [--session-id <id>] [--timeout <duration>] [what Grok should investigate, solve, or continue]'
+argument-hint: '[--background|--wait] [--write|--read-only] [--model <model>] [--effort <low|medium|high|xhigh|max>] [--session-id <id>] [--resume=<id>] [--continue] [--timeout <duration>] [what Grok should investigate, solve, or continue]'
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -17,7 +17,7 @@ Execution mode:
 - If neither flag is present, default to foreground for a small, clearly bounded request, and background for anything open-ended or multi-step.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to the companion's `task` subcommand, and do not treat them as part of the natural-language task text.
 - `--write` and `--read-only` are runtime-selection flags. Preserve them for the forwarded `task` call.
-- `--model`, `--effort`, and `--session-id` are runtime-selection flags. Preserve them for the forwarded `task` call.
+- `--model`, `--effort`, `--session-id`, `--resume=<id>` / `--resume`, and `--continue` are runtime-selection flags. Preserve them for the forwarded `task` call.
 
 Operating rules:
 

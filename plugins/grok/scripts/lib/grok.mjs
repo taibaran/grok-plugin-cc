@@ -287,7 +287,27 @@ export const AUTH_PROBE_DISALLOWED_TOOLS = "Agent,run_terminal_cmd,search_replac
 // by /grok:setup's fallback chain) resolves against the user's actual
 // workspace and not whatever cwd the hook process happens to inherit from
 // Claude Code. Optional — defaults to process.cwd() inside effectiveModel.
-export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessionId, cwd } = {}) {
+// Whitelist of Grok-CLI --effort levels. Validated at the boundary so the
+// caller can pass user input straight through without ad-hoc parsing.
+export const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+// Upper bound on --best-of-n. Grok lets you pick any positive int, but each
+// branch is a full token-spend, so we cap it at 8 to keep accidental
+// 50-branch runs from melting quota. Callers can override with a higher
+// value by passing it explicitly; this default is just the validator default.
+export const BEST_OF_N_MAX = 8;
+
+export function grokBaseArgs({
+  readOnly = true,
+  model,
+  jsonOutput = false,
+  sessionId,
+  cwd,
+  effort,
+  check = false,
+  bestOfN,
+  disableWebSearch = false
+} = {}) {
   const args = [
     "--output-format", jsonOutput ? "json" : "plain",
     "-m", effectiveModel(model, cwd)
@@ -299,6 +319,36 @@ export function grokBaseArgs({ readOnly = true, model, jsonOutput = false, sessi
     args.push("--yolo");
   }
   if (sessionId) args.push("-s", sessionId);
+  // v0.6.0 Grok-specific differentiators:
+  //  --effort tweaks the reasoning budget (low → max). Validated against
+  //    EFFORT_LEVELS so we never forward freeform user input as a flag value.
+  //  --check appends a self-verification loop to the prompt (headless only).
+  //    Grok generates the answer, then critiques it against the original
+  //    prompt. Single flag, no value.
+  //  --best-of-n runs the task N ways in parallel and picks the best result
+  //    (headless only). Costs N× tokens; we cap at BEST_OF_N_MAX by default.
+  //  --disable-web-search turns off Grok's built-in web search + web_fetch.
+  //    Useful for offline/repo-only reviews where you don't want sources
+  //    pulled in. (Default for Grok is web search ON — that's its big
+  //    differentiator against Claude's training cutoff.)
+  if (effort != null && effort !== "") {
+    if (!EFFORT_LEVELS.has(String(effort))) {
+      throw new Error(`invalid --effort: ${effort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
+    }
+    args.push("--effort", String(effort));
+  }
+  if (check) args.push("--check");
+  if (bestOfN != null) {
+    const n = Number(bestOfN);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new Error(`invalid --best-of-n: ${bestOfN} (must be a positive integer)`);
+    }
+    if (n > BEST_OF_N_MAX) {
+      throw new Error(`--best-of-n ${n} exceeds plugin cap of ${BEST_OF_N_MAX}`);
+    }
+    args.push("--best-of-n", String(n));
+  }
+  if (disableWebSearch) args.push("--disable-web-search");
   return args;
 }
 

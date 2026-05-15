@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Grok Companion — slim dispatcher.
-// Subcommands: setup | ask | review | adversarial-review | task | status | result | cancel | purge
+// Subcommands:
+//   setup | ask | review | adversarial-review | task |
+//   imagine | imagine-video |
+//   research | models | bestof |     ← v0.6.0 Grok-specific differentiators
+//   status | result | cancel | purge
 //
 // Heavy lifting lives in scripts/lib/ — this file just routes.
 
@@ -1082,10 +1086,218 @@ function cmdPurge({ flags }) {
 
 // ---------- main ----------
 
+// ---------- v0.6.0: /grok:research ----------
+//
+// Deep research / long-form question mode. Uses --effort max + --check by
+// default (self-verification loop). Web search stays ON — that's the whole
+// point of /grok:research, otherwise it would just be /grok:ask with a
+// bigger timeout.
+//
+// Default timeout 30 min (research streams can run multi-minute) but the
+// user can override with --timeout.
+const DEFAULT_RESEARCH_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_RESEARCH_MAX_TURNS = 60;
+
+function cmdResearch({ flags, positional }) {
+  const prompt = positional.join(" ").trim();
+  if (!prompt) {
+    console.error("Usage: research <question>");
+    process.exit(2);
+  }
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_RESEARCH_TIMEOUT_MS);
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  // Research-mode defaults: effort=max, check=true. User can override
+  // either via flags. Web-search defaults to ON; pass --no-web-search to
+  // disable.
+  const effortRaw = flags.effort != null ? flags.effort : "max";
+  const checkFlag = flags.check === false ? false : true;
+  const disableWebSearch = !!flags["no-web-search"];
+  let baseArgs;
+  try {
+    baseArgs = grokBaseArgs({
+      readOnly: true,
+      model: flags.model,
+      jsonOutput: true,
+      effort: effortRaw,
+      check: checkFlag,
+      disableWebSearch
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_RESEARCH_MAX_TURNS)];
+  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+  const r = spawnSync("grok", args, spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] research timed out after ${timeoutMs}ms. Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 1h.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
+  const parsed = parseGrokJson(r.stdout || "");
+  if (parsed.kind === "text") {
+    process.stdout.write(parsed.text + "\n");
+    process.exit(0);
+  }
+  if (parsed.kind === "error") {
+    const why = classifyAuthBlob(parsed.message);
+    process.stderr.write(`Grok error: ${parsed.message}\n`);
+    if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
+    process.exit(1);
+  }
+  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+  if (r.status !== 0) {
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
+    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+  }
+  process.exit(r.status ?? 0);
+}
+
+// ---------- v0.6.0: /grok:models ----------
+//
+// Wraps `grok models`. Optional --set-default <id> persists the model into
+// the per-workspace activeModel config. Optional --json emits the workspace
+// config + parsed model list as JSON.
+function cmdModels({ flags, positional }) {
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  if (flags["set-default"]) {
+    const target = positional[0] || flags.model;
+    if (!target) {
+      console.error("Usage: models --set-default <model-id>");
+      process.exit(2);
+    }
+    setActiveModel(process.cwd(), String(target));
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: true, activeModel: String(target) }));
+    } else {
+      console.log(`Active model for this workspace set to: ${target}`);
+      console.log("(Per-call --model still overrides; GROK_PLUGIN_MODEL env still overrides per-call.)");
+    }
+    process.exit(0);
+  }
+  const r = spawnSync("grok", ["models"], { encoding: "utf8", env: cleanGrokEnv() });
+  const out = sanitizeForTerminal(r.stdout || "");
+  const err = sanitizeForTerminal(r.stderr || "");
+  if (flags.json) {
+    // Best-effort parse — `grok models` is plain text today, so we just
+    // return the raw stdout and let the caller eyeball it. If the future
+    // grok CLI grows a `models --json` we'll switch to that.
+    const cfg = (() => { try { return readConfig(process.cwd()); } catch { return {}; } })();
+    console.log(JSON.stringify({
+      raw: out,
+      activeModel: cfg.activeModel || null,
+      pluginDefault: DEFAULT_MODEL,
+      effective: effectiveModel(null, process.cwd())
+    }));
+    process.exit(r.status ?? 0);
+  }
+  if (out) process.stdout.write(out);
+  if (err) process.stderr.write(err);
+  const cfg = (() => { try { return readConfig(process.cwd()); } catch { return {}; } })();
+  process.stdout.write(`\n[grok-plugin] effective model for this workspace: ${effectiveModel(null, process.cwd())}\n`);
+  if (cfg.activeModel) {
+    process.stdout.write(`[grok-plugin] workspace pinned: ${cfg.activeModel}\n`);
+  }
+  process.stdout.write(`[grok-plugin] plugin default: ${DEFAULT_MODEL}\n`);
+  if (process.env.GROK_PLUGIN_MODEL) {
+    process.stdout.write(`[grok-plugin] env override (GROK_PLUGIN_MODEL): ${process.env.GROK_PLUGIN_MODEL}\n`);
+  }
+  process.exit(r.status ?? 0);
+}
+
+// ---------- v0.6.0: /grok:bestof ----------
+//
+// Parallel-branch wrapper. Calls Grok with `--best-of-n N` so the model
+// runs the prompt N ways internally and returns its best answer. The
+// number of branches is capped by BEST_OF_N_MAX in lib/grok.mjs.
+//
+// Cost note: each branch is a full token-spend; --best-of-n 5 costs ~5×
+// a regular /grok:ask. The plugin caps at BEST_OF_N_MAX (default 8).
+const DEFAULT_BESTOF_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_BESTOF_MAX_TURNS = 30;
+function cmdBestOf({ flags, positional }) {
+  // First positional is N, rest is the prompt. Also accept --best-of-n N.
+  let n = flags["best-of-n"];
+  let prompt;
+  if (n != null) {
+    prompt = positional.join(" ").trim();
+  } else if (positional.length >= 2 && /^\d+$/.test(positional[0])) {
+    n = positional[0];
+    prompt = positional.slice(1).join(" ").trim();
+  } else {
+    console.error("Usage: bestof <N> <prompt>  (or: bestof --best-of-n <N> <prompt>)");
+    process.exit(2);
+  }
+  if (!prompt) {
+    console.error("Usage: bestof <N> <prompt>");
+    process.exit(2);
+  }
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_BESTOF_TIMEOUT_MS);
+  const effort = flags.effort;
+  const checkFlag = !!flags.check;
+  const disableWebSearch = !!flags["no-web-search"];
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  let baseArgs;
+  try {
+    baseArgs = grokBaseArgs({
+      readOnly: true,
+      model: flags.model,
+      jsonOutput: true,
+      effort,
+      check: checkFlag,
+      bestOfN: n,
+      disableWebSearch
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_BESTOF_MAX_TURNS)];
+  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+  const r = spawnSync("grok", args, spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    process.stderr.write(`\n[grok-plugin] bestof timed out after ${timeoutMs}ms.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
+  const parsed = parseGrokJson(r.stdout || "");
+  if (parsed.kind === "text") {
+    process.stdout.write(parsed.text + "\n");
+    process.exit(0);
+  }
+  if (parsed.kind === "error") {
+    const why = classifyAuthBlob(parsed.message);
+    process.stderr.write(`Grok error: ${parsed.message}\n`);
+    if (why) process.stderr.write(`[hint: ${why}. Run /grok:setup.]\n`);
+    process.exit(1);
+  }
+  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+  if (r.status !== 0) {
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
+    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+  }
+  process.exit(r.status ?? 0);
+}
+
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|bestof|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
@@ -1103,13 +1315,16 @@ async function main() {
     case "imagine": return await cmdImagine(args, { video: false });
     case "imagine-video": return await cmdImagine(args, { video: true });
     case "task": return await cmdTask(args);
+    case "research": return cmdResearch(args);
+    case "models": return cmdModels(args);
+    case "bestof": return cmdBestOf(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
     case "cancel": return await cmdCancel(args);
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|bestof|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

@@ -71,11 +71,17 @@ export function parseArgs(argv, { boolFlags = new Set(), valueFlags = new Set() 
 export const COMMON_BOOL_FLAGS = new Set([
   "json", "wait", "background", "all", "write", "read-only",
   "resume", "fresh", "resume-last", "continue",
-  "enable-review-gate", "disable-review-gate"
+  "enable-review-gate", "disable-review-gate",
+  // v0.6.0 Grok-specific differentiator flags
+  "check",                // --check: self-verification loop (headless)
+  "no-web-search",        // --no-web-search: turn OFF default web search
+  "set-default"           // /grok:models --set-default: persist activeModel
 ]);
 
 export const COMMON_VALUE_FLAGS = new Set([
-  "base", "scope", "model", "older-than", "timeout", "effort", "session-id"
+  "base", "scope", "model", "older-than", "timeout", "effort", "session-id",
+  // v0.6.0 Grok-specific differentiator value flags
+  "best-of-n"             // --best-of-n N: parallel branches (cap BEST_OF_N_MAX)
 ]);
 
 // Parse a duration string. Accepts "30d", "12h", "45m", "60s", "500ms", or a

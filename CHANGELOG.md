@@ -5,6 +5,56 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-05-15
+
+`/goal` round-8 review of v0.8.6: 3/3 consensus on a single CRITICAL
+regression + a real per-reviewer accounting bug from Grok.
+
+### Bug fixes
+
+- **3/3 reviewer consensus — `--timeout 0` broke the CLI fallback**.
+  v0.8.6's `Math.max(0, timeoutMs - elapsed)` collapsed to 0 for the
+  documented "unbounded" sentinel, then the `< 5000` guard always
+  tripped → fallback silently skipped, gemini workaround regressed.
+  **Fix**: `remainingBudgetMs(timeoutMs, elapsed)` now treats 0 as a
+  passthrough (returns 0 = unbounded). The skip-guard now requires
+  `timeoutMs > 0 && budget > 0 && budget < FALLBACK_MIN_BUDGET_MS`.
+
+- **Grok HIGH #2 — batch wall-clock starved fast buggy peers**.
+  v0.8.6 used a single `startedAtMs` for the whole `Promise.all`. If
+  the slowest sibling took 9 of 10 minutes, the gemini fallback got
+  ~1 min of budget even though gemini's own peer attempt took 8s.
+  **Fix**: per-reviewer accounting via each `r.elapsedMs` (already
+  recorded by `spawnReviewer`).
+
+- **Grok MED #3 — FALLBACK_MIN_BUDGET_MS too aggressive at 5000ms**.
+  Spawn cold path can eat 2-6s on a loaded machine. Lowered to 2000ms
+  (and named the constant explicitly so it's no longer magic).
+
+- **Grok MED #4 / Grok LOW #5 / Grok LOW #6 — testability**.
+  Predicate + budget logic extracted to module-scope helpers
+  (`shouldFallbackToCli`, `isPeerEmptyDiffMessage`, `remainingBudgetMs`,
+  `MAX_PEER_EARLY_EXIT_BYTES`, `FALLBACK_MIN_BUDGET_MS`), all
+  exported. Replaces 3 source-grep tests with 10 behavioral ones that
+  exercise edge cases (parsed-verdict-with-mid-prose-phrase,
+  long-output-rejection, empty-diff-rejection, anchored-regex,
+  per-reviewer budget, unbounded passthrough).
+
+- **Grok LOW — dead `startedAt` alias**. Removed.
+
+- **Test infrastructure**. v0.8.7's helper extraction means test
+  files now `import` from companion.mjs to call the helpers directly.
+  Without a guard, every import would trigger `main()` with no
+  subcommand → usage error → test failure. Gated `main()` on
+  `process.argv[1] === fileURLToPath(import.meta.url)` so importing
+  the module no longer runs the CLI dispatcher.
+
+### Tests
+
+- 10 new behavioral tests on the extracted helpers (replaces 3
+  source-grep tests).
+- Total suite: 277 passing.
+
 ## [0.8.6] - 2026-05-15
 
 `/goal` round-7 (the first round where Gemini actually delivered a

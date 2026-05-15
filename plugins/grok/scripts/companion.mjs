@@ -1816,6 +1816,64 @@ function spawnReviewer(spec, common) {
   });
 }
 
+// ---------- v0.8.7 CLI-fallback helpers (extracted for testability) ----------
+//
+// The peer-plugin-cc#4 workaround needs three primitives that v0.8.5/v0.8.6
+// had inlined. Extracting them gives behavioral tests a clean entry point
+// (Grok LOW #6 round-8) and makes the predicate change-resistant
+// (`MAX_PEER_EARLY_EXIT_BYTES` is now a named constant — Grok MED #4).
+
+// The peer plugin's empty-diff early-exit message is one line (~50 bytes
+// in current gemini-plugin-cc). Be generous: 400 bytes covers any minor
+// future change without admitting multi-paragraph reviews. Falsy/empty
+// strings short-circuit to false. ANCHORED ^ regex prevents matching
+// the phrase mid-prose in a real review.
+export const MAX_PEER_EARLY_EXIT_BYTES = 400;
+export function isPeerEmptyDiffMessage(out) {
+  const trimmed = (out || "").trim();
+  return trimmed.length > 0 &&
+    trimmed.length < MAX_PEER_EARLY_EXIT_BYTES &&
+    /^Nothing to review/i.test(trimmed);
+}
+
+// Predicate: should this reviewer's result be retried via raw CLI?
+// All conditions must hold:
+//   1. peer routing was used (we only retry the case the bug affects)
+//   2. peer returned UNPARSED (real reviews always emit a VERDICT: line)
+//   3. output matches the peer's empty-diff early-exit shape (anchored)
+//   4. our captureDiff DID produce a non-empty diff
+export function shouldFallbackToCli(r, diffResult) {
+  if (!r || r.via !== "peer") return false;
+  if (r.verdict !== "UNPARSED") return false;
+  if (!isPeerEmptyDiffMessage(r.output)) return false;
+  if (!diffResult || !diffResult.diff || !diffResult.diff.trim()) return false;
+  return true;
+}
+
+// Compute the per-reviewer remaining timeout budget.
+//   timeoutMs === 0  → user asked for "no timeout"; pass 0 through.
+//                      The 3/3 reviewer consensus in round-8 was that
+//                      v0.8.6 incorrectly tripped its < 5s guard when
+//                      timeoutMs === 0 and silently skipped the entire
+//                      fallback.
+//   timeoutMs  > 0  → return max(0, timeoutMs - reviewerElapsedMs).
+//                      Uses each reviewer's OWN elapsed time, not the
+//                      batch wall-clock — Grok HIGH #2 round-8: batch
+//                      timing was starving fast buggy peers when slow
+//                      siblings ran concurrently.
+export function remainingBudgetMs(timeoutMs, reviewerElapsedMs) {
+  if (timeoutMs === 0) return 0; // 0 = unbounded sentinel
+  const e = Number(reviewerElapsedMs) || 0;
+  return Math.max(0, timeoutMs - e);
+}
+
+// Spawn latency is observable on a loaded machine (which() + spawn cold
+// path can eat 2-6 seconds). Set the minimum useful budget below that
+// so we don't skip fallbacks that would actually run, but well above
+// "0" so a 100ms budget definitely-skips. Round-8 Grok MED #3 flagged
+// the previous 5000 as too aggressive.
+export const FALLBACK_MIN_BUDGET_MS = 2000;
+
 async function cmdAggregateReview({ flags, positional }) {
   const scope = flags.scope || "auto";
   const base = flags.base || null;
@@ -1877,10 +1935,6 @@ async function cmdAggregateReview({ flags, positional }) {
   process.stdout.write(`Diff size: ${diffResult.diff.length} bytes\n\n`);
   process.stdout.write(`Running ${available.length} reviewers in parallel (per-reviewer timeout: ${timeoutMs}ms)...\n\n`);
 
-  // v0.8.6 (Gemini MED): track wall-clock to compute remaining budget
-  // if a CLI fallback fires. timeoutMs is per-reviewer so this is fine.
-  const startedAtMs = Date.now();
-
   let results;
   try {
     results = await Promise.all(available.map(r => spawnReviewer(r.spec, {
@@ -1895,81 +1949,61 @@ async function cmdAggregateReview({ flags, positional }) {
       focus: focus || null
     })));
 
-    // v0.8.5 (gemini-plugin-cc#4 workaround), tightened in v0.8.6
-    // after all 3 reviewers (Codex+Gemini+Grok) flagged a
-    // false-positive class: the original predicate matched "Nothing
-    // to review" ANYWHERE in output, so a real review that contained
-    // the phrase in prose (e.g. "there is nothing to review in the
-    // test utilities because...") would have its real findings
-    // silently discarded.
-    //
-    // The tightened predicate requires:
-    //   1. peer routing was used (r.via === "peer")
-    //   2. peer produced UNPARSED (no VERDICT: line) — a real review
-    //      always emits a verdict, so a parsed result is never the
-    //      bug we're working around
-    //   3. output is short (< 400 bytes) — the peer plugin's
-    //      early-exit message is one line; a real review is multi-KB
-    //   4. output STARTS with "Nothing to review" — anchors out
-    //      mid-prose mentions
-    //   5. our own captureDiff DID find a real diff
-    const startedAt = startedAtMs;
-    const isPeerEmptyDiffMessage = (out) => {
-      const trimmed = (out || "").trim();
-      return trimmed.length > 0 && trimmed.length < 400 &&
-        /^Nothing to review/i.test(trimmed);
-    };
+    // v0.8.5 → v0.8.6 → v0.8.7: gemini-plugin-cc#4 self-healing fallback
+    // for peer reviewers that return the empty-diff early-exit despite
+    // a real diff. Predicate + budget logic extracted to module-scope
+    // helpers below so it can be unit-tested directly. The mechanics:
+    //   1. Filter `results` for entries that look like the peer-bug
+    //      symptom (predicate `shouldFallbackToCli`).
+    //   2. For each, compute its OWN remaining budget from its
+    //      `elapsedMs` (Grok HIGH #2 round-8: batch-level wall-clock
+    //      starved fallbacks when sibling reviewers were slow).
+    //   3. Re-spawn via raw CLI (uses our diff via --prompt-file /
+    //      -p "" + stdin / etc.).
     const cliFallbacksNeeded = results
       .map((r, i) => ({ r, i, spec: available[i].spec }))
-      .filter(({ r }) =>
-        r.via === "peer" &&
-        r.verdict === "UNPARSED" &&
-        isPeerEmptyDiffMessage(r.output) &&
-        diffResult.diff && diffResult.diff.trim().length > 0
-      );
+      .filter(({ r }) => shouldFallbackToCli(r, diffResult));
     if (cliFallbacksNeeded.length > 0) {
       process.stdout.write(
         `[grok-plugin] ${cliFallbacksNeeded.length} peer reviewer(s) returned ` +
         `the empty-diff early-exit "Nothing to review" despite a real diff — ` +
         `retrying via raw CLI (gemini-plugin-cc#4 workaround).\n\n`
       );
-      // v0.8.6 (Gemini MED): use REMAINING budget, not the full
-      // original timeoutMs, or the user-configured timeout would
-      // effectively double. If the peer attempt burned 4 of 10
-      // minutes, the fallback gets the remaining 6.
-      const elapsed = Date.now() - startedAt;
-      const remainingMs = Math.max(0, timeoutMs - elapsed);
-      // Don't bother retrying if there's no meaningful budget left
-      // (< 5s would just produce another spawn failure).
-      if (remainingMs < 5000) {
-        process.stdout.write(
-          `[grok-plugin] insufficient remaining timeout budget (${remainingMs}ms) for CLI fallback — keeping peer result.\n\n`
-        );
-      } else {
-        const fallbackResults = await Promise.all(cliFallbacksNeeded.map(async ({ r, i, spec }) => {
-          // Build a CLI-mode detection. If the binary isn't on PATH
-          // we keep the peer result (worse than CLI, but still better
-          // than nothing).
-          const cliPath = which(spec.name);
-          if (!cliPath) return null;
-          const newResult = await spawnReviewer(spec, {
-            detection: { kind: "cli", path: cliPath },
-            promptFile,
-            promptText: prompt,
-            model: flags.model,
-            timeoutMs: remainingMs,
-            base,
-            scope: scope === "auto" ? null : scope,
-            adversarial: !!flags.adversarial,
-            focus: focus || null
-          });
-          // Tag this reviewer so the report makes clear what happened.
-          newResult.via = "cli-fallback";
-          return { i, newResult };
-        }));
-        for (const fb of fallbackResults) {
-          if (fb) results[fb.i] = fb.newResult;
+      const fallbackResults = await Promise.all(cliFallbacksNeeded.map(async ({ r, i, spec }) => {
+        // Per-reviewer budget: each peer attempt consumed only its own
+        // r.elapsedMs, not the batch wall-clock. Grok HIGH #2 round-8:
+        // the v0.8.6 batch wall-clock approach starved fallbacks for
+        // fast buggy peers when sibling reviewers were slow.
+        const budget = remainingBudgetMs(timeoutMs, r.elapsedMs);
+        // budget === 0 means "unbounded" (the timeoutMs === 0 sentinel
+        // path); only skip when there's a positive but tiny budget.
+        // Codex P2 / Gemini Important #1 / Grok HIGH #1 round-8: the
+        // v0.8.6 < 5000 check incorrectly tripped on --timeout 0.
+        if (timeoutMs > 0 && budget > 0 && budget < FALLBACK_MIN_BUDGET_MS) {
+          process.stdout.write(
+            `[grok-plugin] ${spec.name}: insufficient remaining timeout ` +
+            `budget (${budget}ms < ${FALLBACK_MIN_BUDGET_MS}ms) — keeping peer result.\n\n`
+          );
+          return null;
         }
+        const cliPath = which(spec.name);
+        if (!cliPath) return null;
+        const newResult = await spawnReviewer(spec, {
+          detection: { kind: "cli", path: cliPath },
+          promptFile,
+          promptText: prompt,
+          model: flags.model,
+          timeoutMs: budget,  // 0 means unbounded; passed through
+          base,
+          scope: scope === "auto" ? null : scope,
+          adversarial: !!flags.adversarial,
+          focus: focus || null
+        });
+        newResult.via = "cli-fallback";
+        return { i, newResult };
+      }));
+      for (const fb of fallbackResults) {
+        if (fb) results[fb.i] = fb.newResult;
       }
     }
   } finally {
@@ -2112,7 +2146,18 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error(`grok-plugin fatal: ${err && err.message ? err.message : err}`);
-  process.exit(1);
-});
+// v0.8.7: only auto-run main() when this file is invoked as the
+// CLI entry point. The v0.8.7 CLI-fallback helper extraction means
+// test files now `import` from companion.mjs to call shouldFallbackToCli
+// / remainingBudgetMs directly. Without this guard, every test-file
+// import would trigger main() with no subcommand → usage error → exit 2,
+// failing the whole test file.
+import { fileURLToPath as _fileURLToPath } from "node:url";
+const _entryPath = _fileURLToPath(import.meta.url);
+const _invokedAs = process.argv[1] ? path.resolve(process.argv[1]) : null;
+if (_invokedAs === _entryPath) {
+  main().catch(err => {
+    console.error(`grok-plugin fatal: ${err && err.message ? err.message : err}`);
+    process.exit(1);
+  });
+}

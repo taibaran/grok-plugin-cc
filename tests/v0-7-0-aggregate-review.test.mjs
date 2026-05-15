@@ -60,46 +60,112 @@ test("commands/aggregate-review.md routes through grok:grok-aggregate-review sub
   assert.match(src, /companion\.mjs.*aggregate-review/, "documentation should still reference the underlying companion subcommand");
 });
 
-test("v0.8.6 (3/3 reviewer consensus): cli-fallback predicate is tightened — anchored + UNPARSED + short", () => {
-  const src = fs.readFileSync(COMPANION, "utf8");
-  // The predicate must check:
-  //   1. r.via === "peer"
-  //   2. r.verdict === "UNPARSED"
-  //   3. isPeerEmptyDiffMessage(r.output) — anchored `^Nothing to review` + length < 400
-  //   4. diffResult.diff non-empty
-  // The v0.8.5 version only checked condition 1 + an UNANCHORED regex
-  // + condition 4 — which would have stomped a real review that
-  // happens to contain "nothing to review" in its prose.
-  const block = src.slice(
-    src.indexOf("v0.8.5 (gemini-plugin-cc#4 workaround)"),
-    src.indexOf("if (cliFallbacksNeeded.length > 0)")
-  );
-  assert.match(block, /isPeerEmptyDiffMessage/);
-  assert.match(block, /r\.verdict === "UNPARSED"/);
-  assert.match(block, /\^Nothing to review/,
-    "the regex must be anchored to the START of the output (not unanchored)");
-  assert.match(block, /trimmed\.length < 400/,
-    "the predicate must reject long outputs (real reviews are multi-KB)");
+// ============================================================================
+// v0.8.7 — CLI-fallback helpers behavioral tests (Grok LOW #6 round-8:
+// replace source-grep tests with executable assertions on the exported
+// helpers). The helpers are pure functions extracted from cmdAggregateReview.
+// ============================================================================
+
+test("v0.8.7 (Grok L6): shouldFallbackToCli rejects parsed verdicts (real review wins)", async () => {
+  const { shouldFallbackToCli } = await import("../plugins/grok/scripts/companion.mjs");
+  const diff = { diff: "real diff content" };
+  // A REAL review that happens to contain "Nothing to review" mid-prose
+  // (e.g. "I have nothing to review in the test utilities") and parses
+  // as APPROVE_WITH_NITS — must NOT trigger the fallback (the 3/3
+  // consensus bug from round-7).
+  const r = {
+    via: "peer",
+    verdict: "APPROVE_WITH_NITS",
+    output: "Long real review here.\n\nNothing to review in the helpers folder.\n\nVERDICT: APPROVE_WITH_NITS"
+  };
+  assert.equal(shouldFallbackToCli(r, diff), false,
+    "must NOT retry a parsed verdict regardless of the magic phrase in prose");
 });
 
-test("v0.8.6 (Gemini MED): CLI fallback uses remaining timeout budget", () => {
-  const src = fs.readFileSync(COMPANION, "utf8");
-  // After v0.8.6, the fallback computes elapsed wall-clock + uses
-  // the remaining budget instead of doubling the user-configured
-  // timeout.
-  const block = src.slice(
-    src.indexOf("if (cliFallbacksNeeded.length > 0)"),
-    src.indexOf("for (const fb of fallbackResults)")
-  );
-  assert.match(block, /remainingMs\s*=\s*Math\.max\(\s*0,\s*timeoutMs - elapsed\s*\)/);
-  assert.match(block, /timeoutMs:\s*remainingMs/,
-    "the fallback spawn must receive remainingMs, not the original timeoutMs");
+test("v0.8.7: shouldFallbackToCli accepts the actual gemini-plugin-cc#4 early-exit symptom", async () => {
+  const { shouldFallbackToCli } = await import("../plugins/grok/scripts/companion.mjs");
+  const diff = { diff: "real diff" };
+  const r = {
+    via: "peer",
+    verdict: "UNPARSED",
+    output: "Nothing to review (scope: branch, base: HEAD~1)."
+  };
+  assert.equal(shouldFallbackToCli(r, diff), true);
 });
 
-test("v0.8.6 (Grok LOW): dead peerFallbackFrom field removed", () => {
+test("v0.8.7: shouldFallbackToCli rejects when our diff is empty", async () => {
+  const { shouldFallbackToCli } = await import("../plugins/grok/scripts/companion.mjs");
+  const r = {
+    via: "peer",
+    verdict: "UNPARSED",
+    output: "Nothing to review (scope: working-tree)."
+  };
+  // No diff to recover.
+  assert.equal(shouldFallbackToCli(r, { diff: "" }), false);
+  assert.equal(shouldFallbackToCli(r, { diff: "   \n  " }), false);
+  assert.equal(shouldFallbackToCli(r, null), false);
+});
+
+test("v0.8.7: shouldFallbackToCli rejects long outputs that happen to start with the phrase", async () => {
+  const { shouldFallbackToCli, MAX_PEER_EARLY_EXIT_BYTES } = await import("../plugins/grok/scripts/companion.mjs");
+  const diff = { diff: "real" };
+  const r = {
+    via: "peer",
+    verdict: "UNPARSED",
+    output: "Nothing to review " + "x".repeat(MAX_PEER_EARLY_EXIT_BYTES + 50)
+  };
+  assert.equal(shouldFallbackToCli(r, diff), false,
+    "outputs longer than MAX_PEER_EARLY_EXIT_BYTES must not match the early-exit pattern");
+});
+
+test("v0.8.7: shouldFallbackToCli rejects mid-prose 'nothing to review' (anchored)", async () => {
+  const { shouldFallbackToCli } = await import("../plugins/grok/scripts/companion.mjs");
+  const diff = { diff: "real" };
+  const r = {
+    via: "peer",
+    verdict: "UNPARSED",
+    output: "Some other content first. Nothing to review here."
+  };
+  assert.equal(shouldFallbackToCli(r, diff), false,
+    "regex must be anchored to the START of trimmed output");
+});
+
+test("v0.8.7 (3/3 round-8): remainingBudgetMs treats timeoutMs===0 as unbounded passthrough", async () => {
+  const { remainingBudgetMs } = await import("../plugins/grok/scripts/companion.mjs");
+  // The bug all 3 reviewers caught: v0.8.6 computed
+  // Math.max(0, 0 - elapsed) = 0, then `< 5000` → fallback skipped.
+  assert.equal(remainingBudgetMs(0, 1000), 0, "unbounded sentinel propagates as 0");
+  assert.equal(remainingBudgetMs(0, 999999), 0, "unbounded sentinel ignores elapsed");
+});
+
+test("v0.8.7 (Grok H2 round-8): remainingBudgetMs uses per-reviewer elapsed, not batch wall-clock", async () => {
+  const { remainingBudgetMs } = await import("../plugins/grok/scripts/companion.mjs");
+  // 10-minute total budget. Reviewer only used 8 seconds; the batch's
+  // slowest sibling may have used 9 minutes — that's irrelevant here.
+  // The fallback should get nearly the full 10 minutes.
+  const remaining = remainingBudgetMs(10 * 60 * 1000, 8000);
+  assert.equal(remaining, 10 * 60 * 1000 - 8000);
+});
+
+test("v0.8.7: remainingBudgetMs clamps negative to 0 (positive timeout, over-elapsed)", async () => {
+  const { remainingBudgetMs } = await import("../plugins/grok/scripts/companion.mjs");
+  assert.equal(remainingBudgetMs(1000, 5000), 0);
+});
+
+test("v0.8.7 (Grok M3 round-8): FALLBACK_MIN_BUDGET_MS lowered from 5000 to 2000", async () => {
+  const { FALLBACK_MIN_BUDGET_MS } = await import("../plugins/grok/scripts/companion.mjs");
+  assert.equal(FALLBACK_MIN_BUDGET_MS, 2000);
+});
+
+test("v0.8.7 (Grok L5 round-8): dead startedAt alias removed", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
-  assert.equal(src.includes("peerFallbackFrom"), false,
-    "peerFallbackFrom was written but never read — removed in v0.8.6 (Grok LOW)");
+  assert.equal(src.includes("const startedAt = startedAtMs"), false,
+    "dead variable alias removed");
+});
+
+test("v0.8.7: dead peerFallbackFrom field still absent (regression guard)", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  assert.equal(src.includes("peerFallbackFrom"), false);
 });
 
 test("agents/grok-aggregate-review.md exists with correct structure", () => {

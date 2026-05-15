@@ -39,7 +39,14 @@ export function tokenize(argv) {
   return argv;
 }
 
-export function parseArgs(argv, { boolFlags = new Set(), valueFlags = new Set() } = {}) {
+export function parseArgs(argv, {
+  boolFlags = new Set(),
+  valueFlags = new Set(),
+  // v0.8.0: repeatable value flags accumulate into an array instead of
+  // overwriting. Required for `--allow`/`--deny`/`--rules` which Grok
+  // accepts multiple times.
+  repeatableFlags = new Set()
+} = {}) {
   const tokens = tokenize(argv);
   const flags = {};
   const positional = [];
@@ -51,14 +58,20 @@ export function parseArgs(argv, { boolFlags = new Set(), valueFlags = new Set() 
       flags[rawKey] = inline === undefined ? true : inline !== "false";
       continue;
     }
-    if (valueFlags.has(rawKey)) {
+    if (valueFlags.has(rawKey) || repeatableFlags.has(rawKey)) {
       const v = inline ?? tokens[i + 1];
       if (v === undefined) {
         const err = new Error(`Missing value for --${rawKey}`);
         err.code = "MISSING_VALUE";
         throw err;
       }
-      flags[rawKey] = v;
+      if (repeatableFlags.has(rawKey)) {
+        // Accumulate. Single-occurrence still produces a 1-element array.
+        if (!Array.isArray(flags[rawKey])) flags[rawKey] = [];
+        flags[rawKey].push(v);
+      } else {
+        flags[rawKey] = v;
+      }
       if (inline === undefined) i++;
       continue;
     }
@@ -77,13 +90,36 @@ export const COMMON_BOOL_FLAGS = new Set([
   "no-check",             // --no-check: explicit opt-out (matters for commands where --check defaults to on, e.g. /grok:research)
   "no-web-search",        // --no-web-search: turn OFF default web search
   "set-default",          // /grok:models --set-default: persist activeModel
-  "adversarial"           // /grok:aggregate-review --adversarial: switch all reviewers to adversarial template
+  "adversarial",          // /grok:aggregate-review --adversarial: switch all reviewers to adversarial template
+  // v0.8.0 Grok CLI bool kill-switches
+  "no-subagents",         // --no-subagents: forbid grok from spawning its own subagents
+  "no-plan",              // --no-plan: skip the planning turn
+  "verbatim",             // --verbatim: send the prompt exactly as given (no plugin rewriting)
+  "restore-code"          // --restore-code: checkout the original session commit on resume
 ]);
 
 export const COMMON_VALUE_FLAGS = new Set([
   "base", "scope", "model", "older-than", "timeout", "effort", "session-id",
   // v0.6.0 Grok-specific differentiator value flags
-  "best-of-n"             // --best-of-n N: parallel branches (cap BEST_OF_N_MAX)
+  "best-of-n",            // --best-of-n N: parallel branches (cap BEST_OF_N_MAX)
+  // v0.8.0 Grok CLI permission/policy flags (non-repeatable subset)
+  "tools",                // --tools <list>: allowlist of tool names
+  "max-turns",            // --max-turns N: user-facing turn budget
+  "reasoning-effort",     // --reasoning-effort <effort>: distinct from --effort
+  "system-prompt-override", // --system-prompt-override <prompt>
+  "permission-mode",      // --permission-mode <mode>: user-selectable (plan|auto|acceptEdits|dontAsk|bypassPermissions|default)
+  "agent",                // --agent <name>: pick a bundled Grok agent persona
+  "sandbox"               // --sandbox <profile>: GROK_SANDBOX equivalent
+]);
+
+// v0.8.0: repeatable value flags. Each occurrence appends to an array.
+// Driven by Grok's --allow / --deny / --rules which are explicitly
+// repeatable per `grok --help`. The parser handles accumulation; callers
+// receive `flags["allow"]` as Array<string> (or undefined if never passed).
+export const COMMON_REPEATABLE_FLAGS = new Set([
+  "allow",                // --allow <rule>: ToolPrefix(glob) permission rule
+  "deny",                 // --deny  <rule>: same syntax
+  "rules"                 // --rules <text>: extra system-prompt rules (also accepts @file)
 ]);
 
 // Parse a duration string. Accepts "30d", "12h", "45m", "60s", "500ms", or a

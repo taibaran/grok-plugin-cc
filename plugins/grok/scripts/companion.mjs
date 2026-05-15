@@ -14,7 +14,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
-import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, parseDuration } from "./lib/args.mjs";
+import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS, parseDuration } from "./lib/args.mjs";
 import {
   ensureDir, jobsDir, newJobId,
   writeJobMeta, readJobMeta, listJobs, pruneJobs,
@@ -360,6 +360,29 @@ function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
   process.exit(r.status ?? 0);
 }
 
+// v0.8.0: pluck the user-facing permission/policy flags from a parsed
+// flags object into the shape grokBaseArgs expects. Returns an object
+// suitable for spreading into grokBaseArgs({...}) — only includes keys
+// the user actually passed, so command-specific defaults (effort=max,
+// check=true, etc.) elsewhere are preserved.
+function extractPolicyFlags(flags) {
+  const out = {};
+  if (Array.isArray(flags.allow)) out.allow = flags.allow;
+  if (Array.isArray(flags.deny)) out.deny = flags.deny;
+  if (Array.isArray(flags.rules)) out.rules = flags.rules;
+  if (flags.tools != null) out.tools = flags.tools;
+  if (flags["max-turns"] != null) out.maxTurns = flags["max-turns"];
+  if (flags["no-subagents"]) out.noSubagents = true;
+  if (flags["no-plan"]) out.noPlan = true;
+  if (flags.verbatim) out.verbatim = true;
+  if (flags["reasoning-effort"] != null) out.reasoningEffort = flags["reasoning-effort"];
+  if (flags["system-prompt-override"] != null) out.systemPromptOverride = flags["system-prompt-override"];
+  if (flags["permission-mode"] != null) out.permissionMode = flags["permission-mode"];
+  if (flags.sandbox != null) out.sandbox = flags.sandbox;
+  if (flags.agent != null) out.agent = flags.agent;
+  return out;
+}
+
 function cmdAsk({ flags, positional }) {
   const prompt = positional.join(" ").trim();
   if (!prompt) {
@@ -374,18 +397,32 @@ function cmdAsk({ flags, positional }) {
   }
   // Always request json output internally so we can detect Grok's
   // exit-0-on-internal-error case and surface a clean error.
-  // Gemini v0.6.0 round-2 nit-N2: thread --no-web-search through here too
-  // so /grok:ask --no-web-search actually disables web search (used to be
-  // silently ignored).
+  // v0.6.0 nit-N2: thread --no-web-search.
+  // v0.8.0: thread --allow/--deny/--rules/--tools/--max-turns/etc.
+  // The user --max-turns (if provided) wins over DEFAULT_ASK_MAX_TURNS.
   const disableWebSearch = !!flags["no-web-search"];
-  const args = ["-p", prompt, ...grokBaseArgs({
-    readOnly: true,
-    model: flags.model,
-    jsonOutput: true,
-    disableWebSearch
-  })];
-  args.push("--max-turns", String(DEFAULT_ASK_MAX_TURNS));
-  if (effort) args.push("--effort", effort);
+  const checkFlag = !!flags.check;
+  let baseArgs;
+  try {
+    baseArgs = grokBaseArgs({
+      readOnly: true,
+      model: flags.model,
+      jsonOutput: true,
+      effort,
+      check: checkFlag,
+      disableWebSearch,
+      ...extractPolicyFlags(flags)
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const args = ["-p", prompt, ...baseArgs];
+  // If the user did NOT supply --max-turns, fall back to the plugin
+  // default. extractPolicyFlags already pushed --max-turns into baseArgs
+  // when the user supplied one, so we only add the default in the
+  // absence of a user value.
+  if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_ASK_MAX_TURNS));
   runHeadlessGrok({
     args, timeoutMs, label: "ask",
     timeoutHint: "Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 15m."
@@ -730,9 +767,23 @@ async function cmdReview({ flags, positional }, { adversarial }) {
   // Internal output is always JSON so we can detect Grok's
   // exit-0-on-internal-error contract. We re-serialize for the user when
   // they asked for plain.
-  const args = ["--prompt-file", promptFile, ...grokBaseArgs({ readOnly: true, model: flags.model, jsonOutput: true })];
-  args.push("--max-turns", String(DEFAULT_REVIEW_MAX_TURNS));
+  // v0.8.0: thread --allow/--deny/--rules/etc through review too.
+  let baseArgs;
+  try {
+    baseArgs = grokBaseArgs({
+      readOnly: true,
+      model: flags.model,
+      jsonOutput: true,
+      ...extractPolicyFlags(flags)
+    });
+  } catch (e) {
+    console.error(String(e.message || e));
+    process.exit(2);
+  }
+  const args = ["--prompt-file", promptFile, ...baseArgs];
+  if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_REVIEW_MAX_TURNS));
   if (effort) args.push("--effort", effort);
+  if (flags.check) args.push("--check"); // v0.8.0 cross-command consistency — review can self-verify too
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_REVIEW_TIMEOUT_MS);
 
   const meta = buildJobMeta({
@@ -1206,13 +1257,15 @@ function cmdResearch({ flags, positional }) {
       jsonOutput: true,
       effort,
       check: checkFlag,
-      disableWebSearch
+      disableWebSearch,
+      ...extractPolicyFlags(flags)
     });
   } catch (e) {
     console.error(String(e.message || e));
     process.exit(2);
   }
-  const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_RESEARCH_MAX_TURNS)];
+  const args = ["-p", prompt, ...baseArgs];
+  if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_RESEARCH_MAX_TURNS));
   runHeadlessGrok({
     args, timeoutMs, label: "research",
     timeoutHint: "Re-run with --timeout 0 to disable, or pick a longer duration like --timeout 1h."
@@ -1355,13 +1408,15 @@ function cmdBestOf({ flags, positional }) {
       effort,
       check: checkFlag,
       bestOfN: n,
-      disableWebSearch
+      disableWebSearch,
+      ...extractPolicyFlags(flags)
     });
   } catch (e) {
     console.error(String(e.message || e));
     process.exit(2);
   }
-  const args = ["-p", prompt, ...baseArgs, "--max-turns", String(DEFAULT_BESTOF_MAX_TURNS)];
+  const args = ["-p", prompt, ...baseArgs];
+  if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_BESTOF_MAX_TURNS));
   runHeadlessGrok({ args, timeoutMs, label: "best-of", timeoutHint: "" });
 }
 
@@ -1854,15 +1909,53 @@ async function cmdAggregateReview({ flags, positional }) {
   process.exit(failed.length > 0 ? 1 : 0);
 }
 
+// ---------- v0.8.0: /grok:inspect ----------
+//
+// Wraps `grok inspect`. The CLI emits a structured dump (plain or
+// --json) describing exactly what merged config will affect the next
+// grok call: AGENTS.md / CLAUDE.md / GROK.md rules, autoloaded skills,
+// MCP server configs, permission rules, plugins, LSP, hooks.
+//
+// This is the single most useful "why is grok doing X?" debugging tool
+// and the v0.8.0 research found that all 4 LLMs flagged it as a gap.
+const DEFAULT_INSPECT_TIMEOUT_MS = 30 * 1000;
+function cmdInspect({ flags }) {
+  if (!which("grok")) {
+    console.error("Grok CLI not installed. Run `/grok:setup`.");
+    process.exit(127);
+  }
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_INSPECT_TIMEOUT_MS);
+  const argv = ["inspect"];
+  if (flags.json) argv.push("--json");
+  const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
+  if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);
+  const r = spawnSync("grok", argv, spawnOpts);
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    process.stderr.write(`\n[grok-plugin] inspect timed out after ${timeoutMs}ms.\n`);
+    process.exit(EXIT_TIMEOUT);
+  }
+  if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
+  if (r.status !== 0) {
+    if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
+    if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+  }
+  process.exit(r.status ?? 0);
+}
+
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
   try {
-    args = parseArgs(rest, { boolFlags: COMMON_BOOL_FLAGS, valueFlags: COMMON_VALUE_FLAGS });
+    args = parseArgs(rest, {
+      boolFlags: COMMON_BOOL_FLAGS,
+      valueFlags: COMMON_VALUE_FLAGS,
+      repeatableFlags: COMMON_REPEATABLE_FLAGS
+    });
   } catch (e) {
     if (e.code === "MISSING_VALUE") { console.error(e.message); process.exit(2); }
     throw e;
@@ -1879,13 +1972,14 @@ async function main() {
     case "models": return cmdModels(args);
     case "best-of": return cmdBestOf(args);
     case "aggregate-review": return await cmdAggregateReview(args);
+    case "inspect": return cmdInspect(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
     case "cancel": return await cmdCancel(args);
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|inspect|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

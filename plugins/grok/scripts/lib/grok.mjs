@@ -203,12 +203,25 @@ export function capabilityProbe() {
     "--disallowed-tools",
     "--prompt-file",
     // v0.6.0 — flags required by /grok:research, /grok:best-of, /grok:models.
-    // Grok review nit-G1: probe used to pass on pre-0.6 grok binaries, then
-    // research/best-of failed at runtime with "unknown option".
     "--effort",
     "--check",
     "--best-of-n",
-    "--disable-web-search"
+    "--disable-web-search",
+    // v0.8.0 — permission rule flags + advanced controls. Same G1
+    // motivation: if grok is updated and these are renamed, fail at
+    // setup time (clear error) rather than at user-call time (silent
+    // "unknown option" stderr).
+    "--allow",
+    "--deny",
+    "--tools",
+    "--rules",
+    "--no-subagents",
+    "--no-plan",
+    "--reasoning-effort",
+    "--system-prompt-override",
+    "--verbatim",
+    "--sandbox",
+    "--agent"
   ];
   const missing = required.filter(token => !help.includes(token));
   return { ok: missing.length === 0, missing };
@@ -317,6 +330,48 @@ export const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 // value by passing it explicitly; this default is just the validator default.
 export const BEST_OF_N_MAX = 8;
 
+// v0.8.0: permission_mode values accepted upstream — used by grokBaseArgs
+// when the user-facing `--permission-mode` is supplied.
+export const PERMISSION_MODES = new Set([
+  "default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"
+]);
+
+// v0.8.0: cap rules/allow/deny payloads. Each rule is a glob string;
+// 1 KiB per rule and 256 rules total is well above any reasonable use
+// and protects against accidental megabyte-sized inputs blowing argv
+// (ARG_MAX) on systems where these are passed as separate args.
+const MAX_PERMISSION_RULES = 256;
+const MAX_PERMISSION_RULE_LEN = 1024;
+
+function validateRuleArray(name, arr) {
+  if (arr == null) return null;
+  if (!Array.isArray(arr)) {
+    throw new Error(`--${name} must be an array of strings`);
+  }
+  if (arr.length > MAX_PERMISSION_RULES) {
+    throw new Error(`--${name} too many entries (${arr.length} > ${MAX_PERMISSION_RULES})`);
+  }
+  for (const r of arr) {
+    if (typeof r !== "string") {
+      throw new Error(`--${name} entries must be strings`);
+    }
+    if (r.length === 0) {
+      throw new Error(`--${name} empty string is not a valid rule`);
+    }
+    if (r.length > MAX_PERMISSION_RULE_LEN) {
+      throw new Error(`--${name} rule exceeds ${MAX_PERMISSION_RULE_LEN} chars`);
+    }
+    // Reject ANSI/control bytes early — these get rendered when grok
+    // echoes the rule in error messages and become a prompt-injection
+    // vector. The plugin's threat model treats CLI input as
+    // LLM-controllable.
+    if (/[\x00-\x08\x0b-\x1f\x7f]/.test(r)) {
+      throw new Error(`--${name} rule contains control bytes`);
+    }
+  }
+  return arr;
+}
+
 export function grokBaseArgs({
   readOnly = true,
   model,
@@ -326,13 +381,42 @@ export function grokBaseArgs({
   effort,
   check = false,
   bestOfN,
-  disableWebSearch = false
+  disableWebSearch = false,
+  // v0.8.0 permission/policy passthroughs (all optional)
+  allow,                  // Array<string> | undefined — repeatable --allow
+  deny,                   // Array<string> | undefined — repeatable --deny
+  tools,                  // string | undefined — comma-separated tool allowlist
+  rules,                  // Array<string> | string | undefined — --rules (repeatable; strings or @file paths)
+  maxTurns,               // number | undefined — user override of internal default
+  noSubagents = false,    // --no-subagents
+  noPlan = false,         // --no-plan
+  reasoningEffort,        // string | undefined — --reasoning-effort (distinct from --effort)
+  systemPromptOverride,   // string | undefined — --system-prompt-override (advanced)
+  verbatim = false,       // --verbatim
+  permissionMode,         // string | undefined — user-selectable; overrides readOnly's default
+  sandbox,                // string | undefined — --sandbox <profile>
+  agent                   // string | undefined — --agent <name>
 } = {}) {
   const args = [
     "--output-format", jsonOutput ? "json" : "plain",
     "-m", effectiveModel(model, cwd)
   ];
-  if (readOnly) {
+  // v0.8.0: --permission-mode is now user-controllable. If the user
+  // provided one, validate against PERMISSION_MODES (defense against
+  // prompt-injection / typo). Otherwise keep the read-only default
+  // (plan) or write-mode default (--yolo, which means auto-approve
+  // every tool use).
+  if (permissionMode != null && permissionMode !== "") {
+    if (!PERMISSION_MODES.has(String(permissionMode))) {
+      throw new Error(`invalid --permission-mode: ${permissionMode}. Allowed: ${[...PERMISSION_MODES].join(",")}`);
+    }
+    args.push("--permission-mode", String(permissionMode));
+    // Even with a custom permission mode, in read-only contexts we
+    // still want the disallowed-tools shield as belt-and-suspenders
+    // (a user can pick `auto` mode and we still strip search_replace/
+    // run_terminal_cmd/todo_write, plus the skill bans from v0.7.3).
+    if (readOnly) args.push("--disallowed-tools", READ_ONLY_DISALLOWED_TOOLS);
+  } else if (readOnly) {
     args.push("--permission-mode", "plan");
     args.push("--disallowed-tools", READ_ONLY_DISALLOWED_TOOLS);
   } else {
@@ -369,6 +453,83 @@ export function grokBaseArgs({
     args.push("--best-of-n", String(n));
   }
   if (disableWebSearch) args.push("--disable-web-search");
+
+  // v0.8.0 permission-rule passthroughs. Each --allow / --deny is a
+  // repeatable token; the validator caps both count and per-entry size
+  // + scrubs control bytes (prompt-injection defense).
+  const allowList = validateRuleArray("allow", allow);
+  if (allowList) {
+    for (const rule of allowList) args.push("--allow", rule);
+  }
+  const denyList = validateRuleArray("deny", deny);
+  if (denyList) {
+    for (const rule of denyList) args.push("--deny", rule);
+  }
+  // --tools is comma-separated already per `grok --help`; we accept
+  // a string (treat as-is) or an array (join with commas). Validate
+  // each entry for control bytes the same way.
+  if (tools != null && tools !== "") {
+    const list = Array.isArray(tools) ? tools : String(tools).split(",").map(s => s.trim()).filter(Boolean);
+    validateRuleArray("tools", list);
+    args.push("--tools", list.join(","));
+  }
+  // --rules accepts a single value but is also repeatable. Each entry
+  // may be inline text or an @file path. We pass them through; grok
+  // itself handles @file expansion.
+  if (rules != null && rules !== "") {
+    const list = Array.isArray(rules) ? rules : [rules];
+    validateRuleArray("rules", list);
+    for (const r of list) args.push("--rules", r);
+  }
+  // --max-turns user override. The CLI accepts a positive integer.
+  if (maxTurns != null) {
+    const n = Number(maxTurns);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new Error(`invalid --max-turns: ${maxTurns} (must be a positive integer)`);
+    }
+    args.push("--max-turns", String(n));
+  }
+  if (noSubagents) args.push("--no-subagents");
+  if (noPlan) args.push("--no-plan");
+  if (verbatim) args.push("--verbatim");
+  if (reasoningEffort != null && reasoningEffort !== "") {
+    // Reasoning effort uses the same level set as --effort, but it's
+    // applied only to reasoning models. Use the same validator.
+    if (!EFFORT_LEVELS.has(String(reasoningEffort))) {
+      throw new Error(`invalid --reasoning-effort: ${reasoningEffort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
+    }
+    args.push("--reasoning-effort", String(reasoningEffort));
+  }
+  if (systemPromptOverride != null && systemPromptOverride !== "") {
+    // Sanitize control bytes — system-prompt-override goes verbatim
+    // into the grok system prompt and any control bytes would render
+    // in error echoes.
+    const s = String(systemPromptOverride);
+    if (s.length > 16 * 1024) {
+      throw new Error(`--system-prompt-override too long (>${16 * 1024} chars). Use --rules @file for large rules.`);
+    }
+    if (/[\x00-\x08\x0b-\x1f\x7f]/.test(s)) {
+      throw new Error(`--system-prompt-override contains control bytes`);
+    }
+    args.push("--system-prompt-override", s);
+  }
+  if (sandbox != null && sandbox !== "") {
+    // grok accepts arbitrary profile names; we just sanity-check length
+    // and control bytes. The "real" defense is the kernel's own
+    // sandboxing — we're just passing the name through.
+    const s = String(sandbox);
+    if (s.length > 128 || /[\x00-\x08\x0b-\x1f\x7f\/]/.test(s)) {
+      throw new Error(`--sandbox profile name invalid: ${s.slice(0, 32)}`);
+    }
+    args.push("--sandbox", s);
+  }
+  if (agent != null && agent !== "") {
+    const s = String(agent);
+    if (s.length > 128 || /[\x00-\x08\x0b-\x1f\x7f\/]/.test(s)) {
+      throw new Error(`--agent name invalid: ${s.slice(0, 32)}`);
+    }
+    args.push("--agent", s);
+  }
   return args;
 }
 

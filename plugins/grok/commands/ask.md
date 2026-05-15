@@ -1,6 +1,6 @@
 ---
 description: Ask Grok a one-off question (read-only)
-argument-hint: '[--model <model>] [--effort <low|medium|high|xhigh|max>] [--timeout <duration>] <question>'
+argument-hint: '[--model <model>] [--effort <low|medium|high|xhigh|max>] [--timeout <duration>] [--max-turns <N>] [--allow <rule>] [--deny <rule>] [--tools <list>] [--rules <text|@file>] [--no-web-search] [--check] [--no-subagents] [--no-plan] [--verbatim] [--reasoning-effort <effort>] [--sandbox <profile>] [--agent <name>] <question>'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---

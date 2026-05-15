@@ -5,6 +5,80 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-15
+
+**"Permission Model Parity + Inspectability"** — the v0.8.0 release the
+4-LLM research pass (Codex + Gemini + Grok + Claude general) unanimously
+picked as the highest-value next step.
+
+### New commands
+
+- **`/grok:inspect [--json]`** — wraps `grok inspect`. Shows the merged
+  config (AGENTS.md, skills, MCP, rules, permissions, LSP, hooks) that
+  will apply to the next call. All 4 LLMs flagged this as a gap: the
+  single most useful "why is grok doing X?" debugging tool was
+  unreachable from inside Claude Code.
+
+### New flags (threaded through ask / review / research / best-of)
+
+- **`--allow <rule>` / `--deny <rule>`** (repeatable) — fine-grained
+  permission rules with `ToolPrefix(glob)` syntax: `--allow "Bash(npm*)"
+  --deny "Bash(sudo*)"`. Strictly better than the old coarse
+  `READ_ONLY_DISALLOWED_TOOLS` constant.
+- **`--tools <list>`** — explicit allowlist of tool names; sharper than
+  denylist for /grok:ask read-only-by-intent.
+- **`--rules <text|@file>`** (repeatable) — per-call system-prompt
+  guardrails without touching AGENTS.md.
+- **`--max-turns <N>`** — user override of the hardcoded plugin defaults
+  (ask=30, review=60, research=200, best-of=30). The default is still
+  applied when `--max-turns` is absent.
+- **`--no-subagents` / `--no-plan` / `--verbatim`** — Grok CLI kill-switches.
+- **`--reasoning-effort <effort>`** — distinct from `--effort`; applies
+  only to reasoning models.
+- **`--system-prompt-override <prompt>`** — advanced; size-capped at 16 KiB.
+- **`--permission-mode <mode>`** — user-selectable
+  (`default|acceptEdits|auto|dontAsk|bypassPermissions|plan`).
+- **`--sandbox <profile>`** — `GROK_SANDBOX` equivalent; profile name
+  validated against control bytes + path separators.
+- **`--agent <name>`** — pick a bundled Grok agent persona.
+
+### Hardening
+
+- **`validateRuleArray()`** in `lib/grok.mjs` — every `--allow`/`--deny`/
+  `--rules` entry is sanity-checked: max 256 entries, max 1 KiB per
+  entry, no control bytes (prompt-injection defense). Same defense
+  applied to `--system-prompt-override`, `--sandbox` profile name, and
+  `--agent` name.
+- **`capabilityProbe` extended** — `--allow`, `--deny`, `--tools`,
+  `--rules`, `--no-subagents`, `--no-plan`, `--reasoning-effort`,
+  `--system-prompt-override`, `--verbatim`, `--sandbox`, `--agent`. Same
+  G1 motivation as v0.6.0: if grok renames any of these, setup fails
+  cleanly instead of users hitting "unknown option" at runtime.
+
+### Parser changes
+
+- New `COMMON_REPEATABLE_FLAGS` set + `repeatableFlags` parser option.
+  `--allow`/`--deny`/`--rules` accumulate into arrays; non-repeatable
+  flags still overwrite (last-wins).
+- New `COMMON_VALUE_FLAGS` entries: `tools`, `max-turns`,
+  `reasoning-effort`, `system-prompt-override`, `permission-mode`,
+  `agent`, `sandbox`.
+- New `COMMON_BOOL_FLAGS` entries: `no-subagents`, `no-plan`, `verbatim`,
+  `restore-code`.
+
+### Cross-command consistency
+
+- `/grok:review` and `/grok:adversarial-review` now accept `--check`.
+- All policy flags above are accepted across ask / review / research /
+  best-of (via the new shared `extractPolicyFlags()` helper).
+
+### Tests
+
+- 21 new behavior tests in `tests/v0-8-0-permission-rules.test.mjs`:
+  parser accumulation, grokBaseArgs validators, end-to-end argv
+  capture via fake-grok, capabilityProbe regression.
+- Total suite: 252 passing.
+
 ## [0.7.3] - 2026-05-15
 
 Two real bugs discovered while running the v0.8.0 research pass with

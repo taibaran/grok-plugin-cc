@@ -51,22 +51,68 @@ export function stateDir(cwd = process.cwd()) {
 
 export function jobsDir(cwd) { return path.join(stateDir(cwd), JOBS_DIR_NAME); }
 
-// Create a directory with strict owner-only permissions.
+// Create a directory chain with strict owner-only permissions on EVERY
+// component, not just the leaf.
 //
-// Gemini round-8 finding: O_NOFOLLOW on the leaf only prevents the FINAL
-// path component from being a symlink. An attacker who can write into
-// the parent directory can swap `jobs/` itself for a symlink to `/etc/`
-// — then opening `jobs/shadow` follows the parent symlink and yields
-// `/etc/shadow` (the leaf `shadow` IS a regular file, so O_NOFOLLOW is
-// happy). Mode 0700 on jobsDir + stateDir prevents that swap: only the
-// owning user can rename or replace the directory entries inside.
+// Gemini round-8/9 finding: O_NOFOLLOW on the leaf only prevents the
+// FINAL path component from being a symlink. An attacker who can write
+// into ANY parent directory along the chain can swap that parent for a
+// symlink to `/etc/`, and openSync will follow the parent symlink and
+// yield arbitrary files. Mode 0700 on only the LEAF (the previous
+// implementation) left intermediate dirs at the umask default (0755 or
+// even 0777 in shared /tmp), so attackers could pre-create or swap
+// stateDir / its parents.
 //
-// We use `{ recursive: true }` for ergonomics (creates the full chain)
-// and `chmodSync` after creation because `mkdirSync`'s `mode` is masked
-// by the process umask on some platforms.
+// This implementation walks the chain bottom-up after the recursive
+// mkdirSync and applies 0700 to each component that we just created or
+// already exists. It stops at the first failing chmod (e.g., when we
+// hit `/tmp` or `/`, which we don't own).
 export function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
-  try { fs.chmodSync(p, 0o700); } catch {}
+  // Walk up the chain from the leaf, chmod each. Stop at the first
+  // directory we cannot chmod (typically `/tmp` or `/` which we don't
+  // own).
+  let cur = path.resolve(p);
+  for (let i = 0; i < 64; i++) {
+    try { fs.chmodSync(cur, 0o700); }
+    catch { break; }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;        // reached root
+    // Stop chmod-ing once we leave the directory tree we own. The
+    // simplest check: don't chmod past the first directory whose
+    // own ownership we cannot verify; in practice this stops at
+    // /Users/<me>, ~/.claude, /tmp, etc. — all directories we either
+    // own (0700-safe) or shouldn't be modifying.
+    let parentStat;
+    try { parentStat = fs.lstatSync(parent); }
+    catch { break; }
+    if (parentStat.uid !== process.getuid()) break;
+    cur = parent;
+  }
+}
+
+// Verify that the entire directory chain leading to jobsDir is a
+// chain of REAL directories owned by us (not symlinks). Used by
+// readBoundedJobLog to detect a parent-directory swap before
+// trusting `fs.realpathSync.native(jobsDir(cwd))` (which would
+// otherwise dynamically resolve through the attacker's symlink).
+//
+// Returns true if every component from jobsDir up to the first
+// non-owned directory is a regular directory we own.
+function isOwnedDirectoryChain(dirPath) {
+  let cur = path.resolve(dirPath);
+  const myUid = process.getuid();
+  for (let i = 0; i < 64; i++) {
+    let st;
+    try { st = fs.lstatSync(cur); }
+    catch { return false; }
+    if (!st.isDirectory()) return false;        // symlink or non-dir → reject
+    if (st.uid !== myUid) return true;           // reached a parent we don't own — fine, stop here
+    const parent = path.dirname(cur);
+    if (parent === cur) return true;
+    cur = parent;
+  }
+  return false;
 }
 
 // ---------- jobs ----------
@@ -232,6 +278,18 @@ export function safeJobLogPath(p, cwd) {
 // Returns the file content (with a truncation marker if it exceeds
 // maxBytes), or null if any safety check failed.
 export function readBoundedJobLog(filePath, cwd, maxBytes = MAX_JOB_LOG_READ_BYTES) {
+  // Pre-flight: verify the WHOLE directory chain leading to jobsDir is
+  // composed of regular directories that we own. If any component is a
+  // symlink or owned by a different user, the chain is compromised and
+  // we must not trust the realpath result (which would dynamically
+  // resolve through whatever the attacker swapped in).
+  //
+  // This closes the gap Gemini flagged in round-9: with the previous
+  // version, realpath(jobsDir) followed the attacker's symlink and
+  // returned `/etc/`, making `fdRealPath.startsWith(realJobsDir + "/")`
+  // pass for `/etc/shadow`.
+  if (!isOwnedDirectoryChain(jobsDir(cwd))) return null;
+
   const safe = safeJobLogPath(filePath, cwd);
   if (!safe) return null;
 

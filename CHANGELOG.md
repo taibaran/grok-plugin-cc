@@ -5,6 +5,58 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-05-15
+
+Round-2 bug fixes for `/grok:aggregate-review`, found by running
+the v0.7.1 dogfood (`/grok:aggregate-review --base HEAD~1 --scope branch`)
+against v0.7.1 itself. Codex (via peer) and Grok (via peer) both
+flagged real issues.
+
+### Bug fixes
+
+- **Grok BLOCKING — `spec.isPlainText` regression**
+  (`companion.mjs::spawnReviewer`). The v0.7.0 round-2 fix that
+  gates `parseGrokJson` behind a plain-text marker was scoped to
+  `spec.isPlainText`, but `isPlainText` is a property of the
+  `buildCmd` RETURN value, not of the spec itself. `spec.isPlainText`
+  was always `undefined`, so the guard was always taken — exactly
+  the regression v0.7.0 round-2 was supposed to fix. Now reads
+  `buildResult.isPlainText`.
+
+- **Codex P1 — `Verdict: needs-attention` slipped past failure check**
+  (`companion.mjs::parseAggVerdict` + aggregate exit code logic).
+  `codex-plugin-cc`'s review renderer writes `Verdict: needs-attention`
+  (lowercase, hyphenated). The old `[A-Z_]+` capture tokenized that
+  as `NEEDS`, which the failure check (REJECT/UNPARSED/etc.) didn't
+  recognize. Codex findings could therefore aggregate as
+  `Status: ok`. v0.7.2 widens the char class to `[A-Za-z_-]+`,
+  normalizes hyphens-to-underscores and case-to-uppercase
+  (`NEEDS_ATTENTION`), and inverts the failure check to an
+  explicit-good whitelist (`AGG_CLEAN_VERDICTS`) so future
+  unrecognized verdicts default to failure.
+
+- **Codex P2 — peer plugin counted without CLI presence**
+  (`AGG_REVIEWERS[*].detect`). Returning `{kind: "peer"}` whenever
+  the cached companion.mjs file exists treated an installed plugin
+  as an installed reviewer. If the user has the peer plugin cached
+  but the underlying CLI isn't on PATH, the command can pass the
+  "at least two reviewers" guard and then fail inside the peer
+  with setup/127 errors. v0.7.2 requires both peer plugin AND
+  `which(name)` for peer routing.
+
+- **Codex P2 — focus text dropped on peer route**
+  (`AGG_REVIEWERS[*].buildCmd`). The aggregate prompt's `focus`
+  positional was passed to the CLI fallback path but never reached
+  peer reviewers. Now: when focus is non-empty, every reviewer
+  auto-switches its sub to `adversarial-review` (which accepts a
+  trailing focus positional in all three peer plugins) and the
+  focus is appended to the args.
+
+### Tests
+
+- 5 new behavior tests covering the four fixes above.
+- Total suite: 226 passing.
+
 ## [0.7.1] - 2026-05-15
 
 Architectural fix for `/grok:aggregate-review` — addresses a real

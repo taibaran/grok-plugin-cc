@@ -1457,18 +1457,25 @@ const AGG_REVIEWERS = [
     name: "codex",
     label: "Codex (OpenAI)",
     detect: () => {
+      // v0.7.2 (Codex P2): a peer plugin's companion.mjs being present
+      // does NOT guarantee the underlying CLI is on PATH or authed.
+      // Require both before we count this reviewer as available.
       const peer = findPeerCompanion("codex");
-      if (peer) return { kind: "peer", path: peer };
       const cli = which("codex");
+      if (peer && cli) return { kind: "peer", path: peer };
       if (cli) return { kind: "cli", path: cli };
       return null;
     },
-    buildCmd: ({ detection, promptText, base, scope, adversarial }) => {
+    buildCmd: ({ detection, promptText, base, scope, adversarial, focus }) => {
       if (detection.kind === "peer") {
-        const sub = adversarial ? "adversarial-review" : "review";
+        // Codex's adversarial-review accepts trailing focus text, plain
+        // review does not. If the user passed focus, auto-switch to
+        // adversarial-review to forward it through (Codex P2 finding).
+        const sub = (adversarial || focus) ? "adversarial-review" : "review";
         const args = [detection.path, sub, "--wait"];
         if (base) args.push("--base", base);
         if (scope) args.push("--scope", scope);
+        if (focus && sub === "adversarial-review") args.push(focus);
         return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
       }
       return {
@@ -1485,17 +1492,18 @@ const AGG_REVIEWERS = [
     label: "Gemini (Google)",
     detect: () => {
       const peer = findPeerCompanion("gemini");
-      if (peer) return { kind: "peer", path: peer };
       const cli = which("gemini");
+      if (peer && cli) return { kind: "peer", path: peer };
       if (cli) return { kind: "cli", path: cli };
       return null;
     },
-    buildCmd: ({ detection, promptText, base, scope, adversarial }) => {
+    buildCmd: ({ detection, promptText, base, scope, adversarial, focus }) => {
       if (detection.kind === "peer") {
-        const sub = adversarial ? "adversarial-review" : "review";
+        const sub = (adversarial || focus) ? "adversarial-review" : "review";
         const args = [detection.path, sub, "--wait"];
         if (base) args.push("--base", base);
         if (scope) args.push("--scope", scope);
+        if (focus && sub === "adversarial-review") args.push(focus);
         return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
       }
       return {
@@ -1512,25 +1520,24 @@ const AGG_REVIEWERS = [
     label: "Grok (xAI)",
     detect: () => {
       const peer = findPeerCompanion("grok");
-      // For grok we always prefer the local plugin (this very script).
-      // If the cache has a different version installed, we still call
-      // it — the user's installed plugin is the source of truth, not
-      // our dev tree. But also fall back to our own __filename when
-      // running from a checkout that isn't installed.
-      if (peer) return { kind: "peer", path: peer };
-      const selfPath = fileURLToPathLocal(import.meta.url);
-      if (selfPath && fs.existsSync(selfPath)) return { kind: "peer", path: selfPath };
       const cli = which("grok");
+      // grok needs the CLI present even for peer routing (peer just
+      // wraps the CLI). Dev-checkout self-path fallback also requires
+      // the CLI.
+      if (peer && cli) return { kind: "peer", path: peer };
+      const selfPath = fileURLToPathLocal(import.meta.url);
+      if (selfPath && cli && fs.existsSync(selfPath)) return { kind: "peer", path: selfPath };
       if (cli) return { kind: "cli", path: cli };
       return null;
     },
-    buildCmd: ({ detection, promptFile, model, base, scope, adversarial }) => {
+    buildCmd: ({ detection, promptFile, model, base, scope, adversarial, focus }) => {
       if (detection.kind === "peer") {
-        const sub = adversarial ? "adversarial-review" : "review";
+        const sub = (adversarial || focus) ? "adversarial-review" : "review";
         const args = [detection.path, sub, "--wait"];
         if (base) args.push("--base", base);
         if (scope) args.push("--scope", scope);
         if (model) args.push("--model", model);
+        if (focus && sub === "adversarial-review") args.push(focus);
         return { cmd: process.execPath, args, stdin: null, isPlainText: true, via: "peer" };
       }
       return {
@@ -1556,10 +1563,32 @@ function fileURLToPathLocal(u) {
   } catch { return null; }
 }
 
+// v0.7.2 (Codex P1 finding): peer plugins emit verdicts in different
+// shapes. codex-plugin-cc's review renderer writes
+// `Verdict: needs-attention` (lowercase, hyphenated). The original
+// `[A-Z_]+` capture took the first all-caps run and gave `NEEDS`, which
+// the failure check didn't recognize. Now we capture a more permissive
+// token and normalize it.
+//
+// Verdicts that count as "clean ship":
+//   APPROVE | APPROVE_WITH_NITS | OK | OK_WITH_NITS | NO_ISSUES
+// Everything else (NEEDS_ATTENTION, REQUIRES_CHANGES, REJECT, FAIL,
+// UNPARSED, NO-OUTPUT, SPAWN_ERROR, etc.) is treated as a failure
+// signal by the aggregate exit-code logic.
+const AGG_CLEAN_VERDICTS = new Set([
+  "APPROVE", "APPROVE_WITH_NITS",
+  "OK", "OK_WITH_NITS",
+  "NO_ISSUES"
+]);
+
 function parseAggVerdict(out) {
   if (!out) return { verdict: "no-output", blocking: 0, nits: 0 };
-  const m = out.match(/VERDICT:\s*([A-Z_]+)/i);
-  const verdict = m ? m[1].toUpperCase() : "UNPARSED";
+  // Allow hyphenated/lowercase verdict words; codex-plugin's renderer
+  // uses `Verdict: needs-attention`. The widened class is [A-Za-z_-]+
+  // and we normalize to UPPERCASE_WITH_UNDERSCORES.
+  const m = out.match(/VERDICT:\s*([A-Za-z_-]+)/i);
+  const raw = m ? m[1] : null;
+  const verdict = raw ? raw.toUpperCase().replace(/-/g, "_") : "UNPARSED";
   // Best-effort counts. The verdict block conventions are user-driven
   // (BLOCKING: / NITS: bullets), so we count lines starting with `-`
   // under those headers if present.
@@ -1660,14 +1689,16 @@ function spawnReviewer(spec, common) {
       if (timer) clearTimeout(timer);
       const elapsedMs = Date.now() - started;
       // v0.7.0 round-2 (Gemini): grok in aggregate-review is invoked
-      // with `--output-format plain` (jsonOutput: false in
-      // grokBaseArgs), so the output is plain markdown. Running
-      // parseGrokJson on plain text returns kind:"unknown" and the old
-      // code then displayed "(grok internal error) " — swallowing the
-      // legitimate review output. The fix is to trust the spec.isPlainText
-      // marker: never try JSON-parsing a stream we asked for plain.
+      // with `--output-format plain`, so the output is plain markdown.
+      //
+      // v0.7.2 (self-dogfood Grok finding): the previous fix used the
+      // wrong scope — the isPlainText property lives on the buildCmd
+      // RETURN value, not on the spec itself, so the spec-level read
+      // was always undefined and the guard was always taken — exactly
+      // the regression the v0.7.0 round-2 fix was meant to prevent.
+      // Use buildResult.isPlainText.
       let display = stdout;
-      if (!spec.isPlainText && spec.name === "grok") {
+      if (!buildResult.isPlainText && spec.name === "grok") {
         const parsed = parseGrokJson(stdout);
         if (parsed.kind === "text") display = parsed.text;
         else if (parsed.kind === "error") display = `(grok internal error) ${parsed.message}`;
@@ -1764,7 +1795,8 @@ async function cmdAggregateReview({ flags, positional }) {
       timeoutMs,
       base,
       scope: scope === "auto" ? null : scope,
-      adversarial: !!flags.adversarial
+      adversarial: !!flags.adversarial,
+      focus: focus || null
     })));
   } finally {
     try { fs.unlinkSync(promptFile); } catch {}
@@ -1796,21 +1828,15 @@ async function cmdAggregateReview({ flags, positional }) {
     process.stdout.write(`| ${r.label} | ${r.verdict} | ${r.blocking} | ${r.nits} | ${(r.elapsedMs/1000).toFixed(1)}s | ${status} |\n`);
   }
 
-  // v0.7.0 round-2 (Codex BLOCKING): exit code must reflect ANY of:
-  //   - REJECT verdict
-  //   - timeout
-  //   - non-zero reviewer exit
-  //   - spawn error
-  //   - UNPARSED / NO-OUTPUT (reviewer didn't follow the verdict contract)
-  // The old `anyReject` check silently exited 0 when a reviewer crashed
-  // or returned freeform markdown that didn't have a "VERDICT: " line —
-  // exactly what happened on the first dogfood run of /grok:aggregate-review
-  // against v0.7.0's own diff (all 3 reviewers returned UNPARSED).
+  // Aggregate failure = anything NOT in the clean-verdict whitelist,
+  // OR a reviewer that didn't even produce a clean run.
+  //
+  // v0.7.0 round-2 added the explicit-bad-verdict list (REJECT, etc.).
+  // v0.7.2 inverts to an explicit-good-verdict whitelist after Codex
+  // P1 found that `Verdict: needs-attention` from codex-plugin-cc was
+  // tokenized as `NEEDS` and slipped through the old check.
   const failed = results.filter(r =>
-    r.verdict === "REJECT" ||
-    r.verdict === "UNPARSED" ||
-    r.verdict === "NO-OUTPUT" ||
-    r.verdict === "SPAWN_ERROR" ||
+    !AGG_CLEAN_VERDICTS.has(r.verdict) ||
     r.timedOut ||
     r.errored ||
     (r.exitCode !== 0 && r.exitCode != null)

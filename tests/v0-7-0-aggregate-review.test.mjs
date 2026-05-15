@@ -30,14 +30,19 @@ test("AGG_REVIEWERS exposes codex/gemini/grok", () => {
   assert.match(block, /name: "grok"/);
 });
 
-test("parseAggVerdict recognizes VERDICT: REJECT|APPROVE|APPROVE_WITH_NITS", async () => {
-  // We can't import parseAggVerdict directly (it's not exported), but we
-  // can verify the regex shape by source pattern.
+test("parseAggVerdict recognizes hyphenated/lowercase verdicts (v0.7.2)", async () => {
+  // v0.7.2 (Codex P1): widened the verdict char class from `[A-Z_]+`
+  // to `[A-Za-z_-]+` so `Verdict: needs-attention` from codex-plugin-cc
+  // parses as `NEEDS_ATTENTION` instead of just `NEEDS` (which slipped
+  // past the failure check).
   const src = fs.readFileSync(COMPANION, "utf8");
   const block = src.slice(src.indexOf("function parseAggVerdict"), src.indexOf("function spawnReviewer"));
-  assert.match(block, /VERDICT:\\s\*\(\[A-Z_\]\+\)/);
+  assert.match(block, /VERDICT:.*\[A-Za-z_-\]/,
+    "verdict regex must accept hyphenated lowercase tokens (peer-plugin formats)");
   assert.match(block, /BLOCKING:/);
   assert.match(block, /NITS:/);
+  // The AGG_CLEAN_VERDICTS whitelist is the new control surface.
+  assert.match(src, /AGG_CLEAN_VERDICTS\s*=\s*new Set\(/);
 });
 
 test("commands/aggregate-review.md calls companion.mjs aggregate-review", () => {
@@ -132,15 +137,17 @@ test("round-2 OOM cap: MAX_REVIEWER_BUF declared and used", () => {
   assert.match(src, /stderrBytes\s*\+\s*n\s*>\s*MAX_REVIEWER_BUF/);
 });
 
-test("round-2 plain-text path: grok output not parsed as JSON when isPlainText is true", () => {
+test("round-2 + v0.7.2 plain-text path: grok output not parsed as JSON when buildResult.isPlainText is true", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
-  // The fix: parseGrokJson is gated by !spec.isPlainText, so a grok run
-  // with --output-format plain (which is what cmdAggregateReview uses)
-  // never goes through the JSON parser that would otherwise swallow
-  // the review as "(grok internal error)".
+  // v0.7.0 round-2 added the guard. v0.7.2 fixed the scope:
+  // isPlainText lives on the buildCmd RETURN value, not on the spec,
+  // so the guard must read buildResult.isPlainText (not spec.isPlainText
+  // which is always undefined). When the guard is correct, a grok run
+  // with --output-format plain never goes through the JSON parser
+  // that would otherwise swallow the review as "(grok internal error)".
   const block = src.slice(src.indexOf("function spawnReviewer"), src.indexOf("async function cmdAggregateReview"));
-  assert.match(block, /!spec\.isPlainText[\s\S]*?parseGrokJson/,
-    "parseGrokJson on grok output must be gated by !spec.isPlainText");
+  assert.match(block, /!buildResult\.isPlainText[\s\S]*?parseGrokJson/,
+    "parseGrokJson on grok output must be gated by !buildResult.isPlainText");
 });
 
 test("round-2 timeout 0 disables timer (Codex finding)", () => {
@@ -150,17 +157,70 @@ test("round-2 timeout 0 disables timer (Codex finding)", () => {
   assert.match(block, /if\s*\(\s*common\.timeoutMs\s*>\s*0\s*\)\s*{\s*\n\s*timer\s*=\s*setTimeout/);
 });
 
-test("round-2 aggregate exit code: UNPARSED + timeout + nonzero exit + spawn error all fail aggregate", () => {
+test("v0.7.2: aggregate exit code uses whitelist (AGG_CLEAN_VERDICTS) — any non-clean verdict fails", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
-  // The fix: failed.length > 0 → exit 1 instead of only checking REJECT.
   const block = src.slice(src.indexOf("const failed = results.filter"), src.indexOf("process.exit(failed.length"));
-  assert.match(block, /verdict === "REJECT"/);
-  assert.match(block, /verdict === "UNPARSED"/);
-  assert.match(block, /verdict === "NO-OUTPUT"/);
-  assert.match(block, /verdict === "SPAWN_ERROR"/);
+  // The new design: failure = NOT in clean-verdict whitelist OR
+  // execution-level problem (timeout/errored/nonzero exit).
+  assert.match(block, /!AGG_CLEAN_VERDICTS\.has\(r\.verdict\)/,
+    "aggregate exit code must use the AGG_CLEAN_VERDICTS whitelist (covers REJECT, NEEDS_ATTENTION, UNPARSED, etc. without enumeration)");
   assert.match(block, /timedOut/);
   assert.match(block, /errored/);
   assert.match(block, /exitCode !== 0/);
+
+  // Verify the whitelist excludes failure-shaped verdicts.
+  const setBlock = src.slice(src.indexOf("AGG_CLEAN_VERDICTS = new Set"), src.indexOf("function parseAggVerdict"));
+  assert.match(setBlock, /"APPROVE"/);
+  assert.match(setBlock, /"APPROVE_WITH_NITS"/);
+  assert.equal(setBlock.includes('"REJECT"'), false);
+  assert.equal(setBlock.includes('"NEEDS_ATTENTION"'), false);
+  assert.equal(setBlock.includes('"UNPARSED"'), false);
+});
+
+test("v0.7.2: parseAggVerdict normalizes 'needs-attention' to 'NEEDS_ATTENTION'", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // The normalization step: hyphens → underscores, lowercase → uppercase.
+  const block = src.slice(src.indexOf("function parseAggVerdict"), src.indexOf("function spawnReviewer"));
+  assert.match(block, /toUpperCase\(\)\.replace\(\/-\/g,\s*"_"\)/,
+    "verdict normalization must replace hyphens with underscores AND uppercase");
+});
+
+test("v0.7.2: detect() requires both peer plugin AND underlying CLI (Codex P2)", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // Each reviewer's detect() must check `which(name)` alongside peer.
+  for (const name of ["codex", "gemini", "grok"]) {
+    const start = src.indexOf(`name: "${name}"`);
+    const next = src.indexOf("name:", start + 10);
+    const block = src.slice(start, next < 0 ? start + 2000 : next);
+    assert.match(block, /peer\s*&&\s*cli/,
+      `${name} reviewer must require both peer plugin AND CLI presence`);
+  }
+});
+
+test("v0.7.2: peer reviewers auto-switch to adversarial-review when focus is set (Codex P2)", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const aggBlock = src.slice(
+    src.indexOf("const AGG_REVIEWERS"),
+    src.indexOf("function fileURLToPathLocal")
+  );
+  // All 3 reviewers must auto-switch sub when focus is non-empty.
+  const adversarialAutoSwitches = (aggBlock.match(/\(adversarial\s*\|\|\s*focus\)\s*\?\s*"adversarial-review"/g) || []).length;
+  assert.equal(adversarialAutoSwitches, 3,
+    "all 3 reviewers must auto-switch to adversarial-review when focus is provided");
+  // And focus must be appended as positional arg when applicable.
+  const focusPushCount = (aggBlock.match(/args\.push\(focus\)/g) || []).length;
+  assert.equal(focusPushCount, 3, "all 3 reviewers must push focus as positional");
+});
+
+test("v0.7.2: spawnReviewer uses buildResult.isPlainText (not spec.isPlainText)", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const block = src.slice(src.indexOf("function spawnReviewer"), src.indexOf("async function cmdAggregateReview"));
+  // The fix: the guard reads buildResult.isPlainText. spec.isPlainText
+  // is always undefined (the property lives on the buildCmd return).
+  assert.match(block, /!buildResult\.isPlainText\s*&&\s*spec\.name === "grok"/,
+    "spawnReviewer must read isPlainText from buildResult, not spec — spec has no such property");
+  assert.equal(block.includes("!spec.isPlainText"), false,
+    "the stale `!spec.isPlainText` check must be removed");
 });
 
 // ============================================================================

@@ -29,7 +29,7 @@ Command selection:
 - If the forwarded request includes `--write` or `--read-only`, pass it through to `task`.
 - If the forwarded request includes `--timeout <duration>`, pass it through. Forms accepted: `300s`, `5m`, `1h`, `500ms`, or `0` to disable. The default for `task` is unbounded (rescue work is open-ended). Override only if the user named a specific duration. On timeout the helper exits 124 — surface that to the user rather than retrying.
 - If the forwarded request includes `--session-id <id>`, pass it through. Grok creates a new session if not found, or resumes it if it exists. Use this to continue a previous rescue thread instead of starting fresh.
-- If the forwarded request includes `--resume=<id>`, `--resume <id>`, or bare `--resume` (resume most-recent), pass it through to `task` — these are Grok-native session-resume flags. `--continue` (continue most-recent session for cwd) is also a passthrough. v0.9.5+: companion's `extractPolicyFlags` routes these into the final grok argv via `grokBaseArgs`.
+- If the forwarded request includes `--resume=<id>` or bare `--resume` (resume most-recent), pass it through to `task`. NOTE: the named form REQUIRES the inline `=` syntax — `--resume <id>` (space-separated) is parsed as bare `--resume` (bool) plus a stray positional, NOT as a named resume. `--continue` (continue most-recent session for cwd) is also a passthrough. v0.9.5+: companion's `extractPolicyFlags` routes these into the final grok argv via `grokBaseArgs`.
 - Never call `purge` from this subagent. `/grok:purge` is a destructive disk-cleanup operation the user invokes explicitly; rescue is forwarder-only.
 
 Safety rules:

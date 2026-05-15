@@ -162,21 +162,65 @@ test("v0.9.1: --worktree=false treats as bool false", () => {
   assert.equal(r.flags.worktree, false);
 });
 
-test("v0.9.5 (Grok HIGH #2 round-5): cmdTask records resume/continue provenance in job meta", () => {
-  // Grok HIGH round-5: v0.9.4 advertised /grok:rescue --resume=<id>
-  // but cmdTask only recorded `requested_session_id` in job meta —
-  // the footer hint never surfaced when the session was started via
-  // --resume or --continue.
-  // v0.9.5 added requested_resume + requested_continue to the extra
-  // block. Verify the source-shape (behavioral test would require
-  // a fake-grok task spawn which is heavier than warranted here).
+test("v0.9.6 (3/3 round-6): formatSessionHint renders all 5 priority cases", async () => {
+  const { formatSessionHint } = await import("../plugins/grok/scripts/companion.mjs");
+  // Priority 1: explicit --session-id
+  const hint1 = formatSessionHint({ requested_session_id: "myname" });
+  assert.match(hint1, /Session: myname/);
+  assert.match(hint1, /--session-id=myname/);
+  assert.match(hint1, /grok -s myname/);
+
+  // Priority 2: --resume=<id> (string)
+  const hint2 = formatSessionHint({ requested_resume: "abc-123" });
+  assert.match(hint2, /Resumed Grok session: abc-123/);
+  assert.match(hint2, /--resume=abc-123/);
+
+  // Priority 3: bare --resume (true)
+  const hint3 = formatSessionHint({ requested_resume: true });
+  assert.match(hint3, /Resumed most-recent/);
+  assert.equal(hint3.includes("=true"), false, "bool form must not emit `=true`");
+
+  // Priority 4: --continue
+  const hint4 = formatSessionHint({ requested_continue: true });
+  assert.match(hint4, /Continued most-recent/);
+  // Gemini Nit #2 round-6: --continue branch must mention `grok -c` too.
+  assert.match(hint4, /grok -c/);
+
+  // Priority 5: legacy meta.session_id
+  const hint5 = formatSessionHint({ session_id: "legacy-x" });
+  assert.match(hint5, /Session: legacy-x/);
+  assert.match(hint5, /--session-id=legacy-x/);
+
+  // No provenance → null
+  assert.equal(formatSessionHint({}), null);
+  assert.equal(formatSessionHint(null), null);
+});
+
+test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   const cmdTask = src.slice(src.indexOf("async function cmdTask"), src.indexOf("// ----------", src.indexOf("async function cmdTask")));
+  assert.match(cmdTask, /requested_session_id:\s*flags\["session-id"\]/);
   assert.match(cmdTask, /requested_resume:\s*flags\.resume/);
   assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
-  // And the footer surfaces all three entry points.
-  assert.match(cmdTask, /typeof meta\.requested_resume === "string"/);
-  assert.match(cmdTask, /meta\.requested_continue/);
+});
+
+test("v0.9.6 (3/3 round-6): renderJobDetails consults all session provenance fields", () => {
+  const src = fs.readFileSync(
+    new URL("../plugins/grok/scripts/lib/render.mjs", import.meta.url),
+    "utf8"
+  );
+  const block = src.slice(src.indexOf("export function renderJobDetails"), src.indexOf("return lines.join", src.indexOf("export function renderJobDetails")));
+  assert.match(block, /meta\.requested_session_id/);
+  assert.match(block, /meta\.requested_resume/);
+  assert.match(block, /meta\.requested_continue/);
+  assert.match(block, /meta\.session_id/);
+});
+
+test("v0.9.6 (3/3 round-6): cmdResult uses formatSessionHint (not inline hint)", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  const cmdResult = src.slice(src.indexOf("function cmdResult"), src.indexOf("// ---------- subcommand: cancel"));
+  assert.match(cmdResult, /formatSessionHint\(meta\)/,
+    "cmdResult must call formatSessionHint, not its own inline hint logic");
 });
 
 test("v0.9.5 (3/3 round-5): rescue command + skills + agent all mention --resume / --continue", () => {

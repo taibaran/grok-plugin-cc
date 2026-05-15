@@ -5,6 +5,53 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-05-15
+
+`/goal` round-6 — 3/3 reviewer convergence (yet again) on the same
+pattern: v0.9.5 added the new `requested_resume` / `requested_continue`
+fields but only wired them into the cmdTask footer. `/grok:status`
+and `/grok:result` (the two surfaces explicitly named in the previous
+bug report!) still consulted only `meta.session_id`.
+
+### Bug fixes
+
+- **3/3 HIGH — Session hint missing from `/grok:status` and `/grok:result`**.
+  Extracted `formatSessionHint(meta)` as a module-scope exported
+  helper. Single source of truth for the priority chain:
+    `requested_session_id` > `requested_resume` (string) > `requested_resume` (true) >
+    `requested_continue` > `session_id`.
+  All three render paths (`cmdTask` footer, `cmdResult`,
+  `renderJobDetails`) now call this helper. The previous "fix in one
+  place, miss it in two others" pattern is closed.
+
+- **Grok HIGH #2 round-6 — cmdResult suggested wrong flag for `session_id`**.
+  When `meta.session_id` (legacy JSON envelope path) was populated,
+  cmdResult suggested `--resume=<id>` — but `--resume` requires the
+  session to already exist, while `--session-id` creates-or-resumes.
+  Users following the suggestion got a "session not found" error.
+  **Fix**: `formatSessionHint` uses `--session-id=` form for the
+  legacy case (matching create-or-resume semantics).
+
+- **Codex P2 round-6 — `--resume <id>` (space form) advertised in skill**.
+  The parser requires `--resume=<id>` (inline `=`); bare `--resume`
+  is bool. The cli-runtime skill text said both forms were accepted.
+  **Fix**: removed the space-form mention; added an explicit note
+  that the named form requires `=`.
+
+- **Gemini Nit #2 round-6 — `--continue` footer missing `grok -c` hint**.
+  The `--resume` branches mention `or grok -r`. The `--continue`
+  branch didn't have its `or grok -c` counterpart. Added.
+
+### Tests
+
+- 4 new tests:
+  - Direct behavioral test of `formatSessionHint` exercising all 5
+    priority cases + null fallback.
+  - Source-shape tests asserting `cmdTask` still records all 3
+    fields, `renderJobDetails` consults all 4 fields, and
+    `cmdResult` calls `formatSessionHint`.
+- Total: 329 passing + 5 integration (skipped).
+
 ## [0.9.5] - 2026-05-15
 
 `/goal` round-5 — 3/3 reviewer convergence on the **incomplete** v0.9.4

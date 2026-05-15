@@ -997,7 +997,9 @@ async function cmdImagine({ flags, positional }, { video }) {
       process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
     }
     if (parsed.sessionId) {
-      process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: /grok:rescue --resume=${parsed.sessionId}  or  grok -r ${parsed.sessionId})\n`);
+      // v0.9.6: use --session-id= form (matches formatSessionHint's
+      // logic for create-or-resume semantics).
+      process.stdout.write(`\nSession: ${parsed.sessionId}  (resume: /grok:rescue --session-id=${parsed.sessionId}  or  grok -s ${parsed.sessionId})\n`);
     }
   } else {
     // No markdown link in the response — surface the raw text so the user
@@ -1109,19 +1111,13 @@ async function cmdTask({ flags, positional }) {
   // for streaming UX, so parseGrokJson returns "unknown" and never records
   // a sessionId. Showing a half-truth footer ("Session: <id>") that the
   // user can't actually `grok -r <id>` is worse than no footer at all.
-  // v0.9.5: surface session provenance for any of the three resume
-  // entry points. Order: explicit --session-id > --resume=<id> >
-  // --resume (bare) > --continue. The footer text differs because
-  // --session-id has a known id; --resume bare and --continue don't.
-  if (meta.requested_session_id) {
-    process.stdout.write(`[grok-plugin] Session: ${meta.requested_session_id}  (resume: /grok:rescue --session-id=${meta.requested_session_id}  or  grok -r ${meta.requested_session_id})\n`);
-  } else if (typeof meta.requested_resume === "string") {
-    process.stdout.write(`[grok-plugin] Resumed Grok session: ${meta.requested_resume}  (continue: /grok:rescue --resume=${meta.requested_resume}  or  grok -r ${meta.requested_resume})\n`);
-  } else if (meta.requested_resume === true) {
-    process.stdout.write(`[grok-plugin] Resumed most-recent Grok session (continue: /grok:rescue --resume  or  grok -r)\n`);
-  } else if (meta.requested_continue) {
-    process.stdout.write(`[grok-plugin] Continued most-recent Grok session (--continue)  (next: /grok:rescue --continue)\n`);
-  }
+  // v0.9.6 (3/3 round-6 + round-5 follow-up): formatSessionHint
+  // consolidates the priority chain so cmdTask footer, cmdResult, and
+  // renderJobDetails all render the same hint shape from the same
+  // job-meta shape. Earlier the priority lived in cmdTask only and the
+  // other two paths missed every entry point except meta.session_id.
+  const hint = formatSessionHint(meta);
+  if (hint) process.stdout.write(`[grok-plugin] ${hint}\n`);
   process.stdout.write(`[grok-plugin] /grok:result ${meta.id}\n`);
   if (result.timedOut) process.exit(EXIT_TIMEOUT);
   if (meta.status === "failed") process.exit(1);
@@ -1179,7 +1175,12 @@ function cmdResult({ positional }) {
   console.log(`Task: ${meta.task_text || "-"}`);
   console.log(`Started: ${fmtTime(meta.started_at)}${meta.ended_at ? `   Ended: ${fmtTime(meta.ended_at)}` : ""}`);
   if (meta.exit_code !== undefined) console.log(`Exit: ${meta.exit_code}`);
-  if (meta.session_id) console.log(`Session: ${meta.session_id}  (resume: /grok:rescue --resume=${meta.session_id}  or  grok -r ${meta.session_id})`);
+  // v0.9.6 (3/3 round-6): use the shared formatSessionHint so /grok:result
+  // surfaces the SAME hint shape as the in-flight cmdTask footer + as
+  // renderJobDetails. Previously this only rendered when meta.session_id
+  // was populated (rare for rescue jobs, which use plain output).
+  const sessionHint = formatSessionHint(meta);
+  if (sessionHint) console.log(sessionHint);
   console.log("\n## Output\n");
   // v0.5.0: switched from `safeJobLogPath` + `readBoundedFile` to
   // `readBoundedJobLog` which atomically validates + opens + reads
@@ -1853,6 +1854,44 @@ function spawnReviewer(spec, common) {
 // strings short-circuit to false. ANCHORED ^ regex prevents matching
 // the phrase mid-prose in a real review.
 export const MAX_PEER_EARLY_EXIT_BYTES = 400;
+// ---------- v0.9.6 session-hint helper ----------
+//
+// Single source of truth for the resume/continue hint rendered by:
+//   - cmdTask's in-flight footer (post-run "Session: X (resume: ...)" line)
+//   - cmdResult (replaying a finished job's details)
+//   - renderJobDetails (lib/render.mjs, used by /grok:status)
+//
+// Before v0.9.6 all three rendered different things and only cmdTask
+// surfaced the new requested_resume / requested_continue provenance.
+// The two render paths missed the resume hint entirely for rescue
+// jobs (which use plain output → meta.session_id is unpopulated).
+//
+// Priority order:
+//   explicit --session-id      (create-or-resume named session)
+//   --resume=<id>              (resume by id)
+//   --resume (bool true)       (resume most-recent)
+//   --continue                 (continue most-recent)
+//   meta.session_id            (legacy: parsed JSON envelope, rare)
+export function formatSessionHint(meta) {
+  if (!meta) return null;
+  if (meta.requested_session_id) {
+    return `Session: ${meta.requested_session_id}  (resume: /grok:rescue --session-id=${meta.requested_session_id}  or  grok -s ${meta.requested_session_id})`;
+  }
+  if (typeof meta.requested_resume === "string") {
+    return `Resumed Grok session: ${meta.requested_resume}  (continue: /grok:rescue --resume=${meta.requested_resume}  or  grok -r ${meta.requested_resume})`;
+  }
+  if (meta.requested_resume === true) {
+    return `Resumed most-recent Grok session  (continue: /grok:rescue --resume  or  grok -r)`;
+  }
+  if (meta.requested_continue) {
+    return `Continued most-recent Grok session (--continue)  (next: /grok:rescue --continue  or  grok -c)`;
+  }
+  if (meta.session_id) {
+    return `Session: ${meta.session_id}  (resume: /grok:rescue --session-id=${meta.session_id}  or  grok -s ${meta.session_id})`;
+  }
+  return null;
+}
+
 export function isPeerEmptyDiffMessage(out) {
   const trimmed = (out || "").trim();
   return trimmed.length > 0 &&

@@ -110,7 +110,22 @@ export function renderJobDetails(meta) {
   lines.push(`Started: ${fmtTime(meta.started_at)}`);
   if (meta.ended_at) lines.push(`Ended: ${fmtTime(meta.ended_at)}`);
   if (meta.exit_code !== undefined) lines.push(`Exit: ${meta.exit_code}`);
-  if (meta.session_id) lines.push(`Session: ${meta.session_id}`);
+  // v0.9.6 (3/3 round-6): consult ALL session provenance fields, not
+  // just session_id. Rescue jobs use plain output → parseGrokJson
+  // returns "unknown" → meta.session_id is never set, even when the
+  // user started the job via --session-id / --resume / --continue.
+  // The priority chain matches formatSessionHint in companion.mjs.
+  if (meta.requested_session_id) {
+    lines.push(`Session: ${meta.requested_session_id}`);
+  } else if (typeof meta.requested_resume === "string") {
+    lines.push(`Resumed session: ${meta.requested_resume}`);
+  } else if (meta.requested_resume === true) {
+    lines.push(`Resumed most-recent Grok session`);
+  } else if (meta.requested_continue) {
+    lines.push(`Continued most-recent Grok session (--continue)`);
+  } else if (meta.session_id) {
+    lines.push(`Session: ${meta.session_id}`);
+  }
   lines.push(`Task: ${meta.task_text || "-"}`);
   lines.push("");
   lines.push("Follow-up:");

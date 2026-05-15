@@ -5,6 +5,39 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-15
+
+Meta-aggregator command for multi-LLM consensus reviews.
+
+### New commands
+
+- **`/grok:aggregate-review [focus]`** — captures the current diff (same
+  scope rules as `/grok:review`) and runs it through every installed
+  peer CLI in parallel: Codex, Gemini, Grok. Aggregates verdicts into a
+  unified markdown report with a per-reviewer detail section and a
+  summary table (verdict + blocking count + nits count + elapsed time).
+  Exits 1 if any reviewer returned `VERDICT: REJECT`, 0 otherwise.
+
+  Per-reviewer command shapes (cross-checked against each CLI's --help):
+    - `codex exec --skip-git-repo-check` with prompt on stdin
+    - `gemini --skip-trust --approval-mode plan -p <prompt>`
+    - `grok -p <prompt>` with the plugin's standard read-only flags
+      (--permission-mode plan + --disallowed-tools)
+
+  Defense-in-depth: every peer CLI is spawned with `cleanGrokEnv()` —
+  the same env-scrubbing allowlist used for the local grok process. A
+  compromised codex/gemini binary cannot exfiltrate ANTHROPIC_API_KEY,
+  AWS_*, etc. through this path.
+
+  Default per-reviewer timeout: 10 minutes. Override via `--timeout`.
+  Requires at least two peer CLIs installed; the command refuses to run
+  with only one because that's just `/grok:review` with extra steps.
+
+### Tests
+
+- 6 new structural + behavior tests in `tests/v0-7-0-aggregate-review.test.mjs`.
+  Total suite: 208 passing.
+
 ## [0.6.0] - 2026-05-15
 
 Three Grok-specific differentiator commands plus refactor of the headless

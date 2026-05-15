@@ -62,6 +62,7 @@ prints `Grok plugin is ready.`, you can use any of the commands below.
 | `/grok:research <question>` | Deep research with Grok — `--effort max` + `--check` self-verification loop + live web search enabled by default. |
 | `/grok:models [--set-default <id>]` | List Grok models via `grok models`; optionally pin the workspace default. |
 | `/grok:best-of <N> <prompt>` | Run a prompt N ways in parallel (`grok --best-of-n N`, capped at 8) and return Grok's best answer. |
+| `/grok:aggregate-review [focus]` | Run the same diff-review against codex + gemini + grok in parallel; aggregate verdicts into a unified report. Needs ≥2 CLIs installed. |
 | `/grok:imagine <description>` | Generate an image from text using Grok Imagine. Returns the saved file path. |
 | `/grok:imagine-video <description>` | Generate a video from text using Grok Imagine. Returns the saved file path. |
 | `/grok:rescue <task>` | Delegate investigation, debugging, or a substantial task to Grok via the `grok-rescue` subagent. |

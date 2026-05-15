@@ -1358,10 +1358,220 @@ function cmdBestOf({ flags, positional }) {
   runHeadlessGrok({ args, timeoutMs, label: "best-of", timeoutHint: "" });
 }
 
+// ============================================================================
+// v0.7.0: /grok:aggregate-review — multi-LLM consensus review
+// ============================================================================
+//
+// Runs the same diff-review prompt against every installed peer CLI
+// (codex, gemini, grok) in parallel, captures their verdicts, and renders
+// a unified report. This is the meta-aggregator the user asked for in the
+// v0.7.0 roadmap.
+//
+// Per-reviewer invocations (cross-checked against their --help output):
+//   codex   exec --skip-git-repo-check                — stdin=prompt
+//   gemini  --skip-trust --approval-mode plan -p <prompt>
+//   grok    --output-format plain -p <prompt> --permission-mode plan
+//                                              --disallowed-tools ...
+//
+// Aggregate timeout is per-reviewer (each gets the full budget); the
+// command waits for all of them, surfacing partial results if any time
+// out. Verdict-parsing is a forgiving regex on `VERDICT: <token>` —
+// reviewers that don't speak the contract get a `verdict: unparsed`
+// label in the summary table.
+
+const DEFAULT_AGG_TIMEOUT_MS = 10 * 60 * 1000;   // 10m per reviewer
+
+const AGG_REVIEWERS = [
+  {
+    name: "codex",
+    label: "Codex (OpenAI)",
+    detect: () => which("codex"),
+    buildCmd: ({ promptFile }) => ({
+      cmd: "codex",
+      args: ["exec", "--skip-git-repo-check"],
+      stdin: fs.readFileSync(promptFile, "utf8")
+    })
+  },
+  {
+    name: "gemini",
+    label: "Gemini (Google)",
+    detect: () => which("gemini"),
+    buildCmd: ({ promptText }) => ({
+      cmd: "gemini",
+      args: ["--skip-trust", "--approval-mode", "plan", "-p", promptText],
+      stdin: null
+    })
+  },
+  {
+    name: "grok",
+    label: "Grok (xAI)",
+    detect: () => which("grok"),
+    buildCmd: ({ promptText, model }) => ({
+      cmd: "grok",
+      args: [
+        "-p", promptText,
+        ...grokBaseArgs({ readOnly: true, model, jsonOutput: false })
+      ],
+      stdin: null
+    })
+  }
+];
+
+function parseAggVerdict(out) {
+  if (!out) return { verdict: "no-output", blocking: 0, nits: 0 };
+  const m = out.match(/VERDICT:\s*([A-Z_]+)/i);
+  const verdict = m ? m[1].toUpperCase() : "UNPARSED";
+  // Best-effort counts. The verdict block conventions are user-driven
+  // (BLOCKING: / NITS: bullets), so we count lines starting with `-`
+  // under those headers if present.
+  const blockingMatch = out.match(/BLOCKING:\s*([\s\S]*?)(?:\n\n|NITS:|STRENGTHS:|RATIONALE:|$)/i);
+  const nitsMatch = out.match(/NITS:\s*([\s\S]*?)(?:\n\n|STRENGTHS:|RATIONALE:|$)/i);
+  const countBullets = s => (s ? (s.match(/^[\s-*]+\S/gm) || []).length : 0);
+  return {
+    verdict,
+    blocking: countBullets(blockingMatch && blockingMatch[1]),
+    nits: countBullets(nitsMatch && nitsMatch[1])
+  };
+}
+
+function spawnReviewer(spec, common) {
+  return new Promise(resolve => {
+    const buildResult = spec.buildCmd(common);
+    const started = Date.now();
+    const proc = spawn(buildResult.cmd, buildResult.args, {
+      stdio: [buildResult.stdin == null ? "ignore" : "pipe", "pipe", "pipe"],
+      env: cleanGrokEnv()
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", d => { stdout += d; });
+    proc.stderr.on("data", d => { stderr += d; });
+    if (buildResult.stdin != null) {
+      proc.stdin.write(buildResult.stdin);
+      proc.stdin.end();
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill("SIGKILL"); } catch {}
+    }, common.timeoutMs);
+    proc.on("close", code => {
+      clearTimeout(timer);
+      const elapsedMs = Date.now() - started;
+      // Sanitize each reviewer's output before mixing into our own
+      // stdout. parseGrokJson handles grok's --output-format json case;
+      // other reviewers' plain output goes through sanitizeForTerminal.
+      let display = stdout;
+      if (spec.name === "grok") {
+        const parsed = parseGrokJson(stdout);
+        if (parsed.kind === "text") display = parsed.text;
+        else if (parsed.kind === "error") display = `(grok internal error) ${parsed.message}`;
+      }
+      const cleaned = sanitizeForTerminal(display);
+      resolve({
+        name: spec.name,
+        label: spec.label,
+        exitCode: code,
+        elapsedMs,
+        timedOut,
+        output: cleaned,
+        stderr: sanitizeForTerminal(stderr).slice(0, 4000),
+        ...parseAggVerdict(cleaned)
+      });
+    });
+  });
+}
+
+async function cmdAggregateReview({ flags, positional }) {
+  const scope = flags.scope || "auto";
+  const base = flags.base || null;
+  const focus = positional.join(" ").trim();
+  const diffResult = captureDiff({ scope: scope === "branch" ? "branch" : scope, base });
+  if (diffResult.kind === "no-repo") {
+    console.log("Not inside a git repository - nothing to review.");
+    process.exit(0);
+  }
+  if (diffResult.kind === "no-base") {
+    console.error("Branch review needs a base ref. Pass --base <ref>.");
+    process.exit(2);
+  }
+  if (diffResult.kind === "bad-ref") {
+    console.error(`Invalid git ref for --base: ${base}`);
+    process.exit(2);
+  }
+  if (!diffResult.diff.trim()) {
+    console.log(`Nothing to review (scope: ${diffResult.kind}${diffResult.base ? `, base: ${diffResult.base}` : ""}).`);
+    process.exit(0);
+  }
+
+  const available = AGG_REVIEWERS.filter(r => r.detect());
+  if (available.length === 0) {
+    console.error("None of codex / gemini / grok are installed. Install at least one CLI to use /grok:aggregate-review.");
+    process.exit(127);
+  }
+  if (available.length === 1) {
+    console.error(`Only ${available[0].name} is installed; /grok:aggregate-review needs at least two CLIs to be useful. Use /${available[0].name}:ask or /grok:ask instead.`);
+    process.exit(2);
+  }
+
+  const target = diffResult.kind + (diffResult.base ? ` (base: ${diffResult.base})` : "");
+  const prompt = buildReviewPrompt({
+    adversarial: !!flags.adversarial,
+    focus,
+    target,
+    jsonOutput: false,
+    diff: diffResult.diff
+  });
+  const promptFile = writePromptToTempFile(prompt, "grok-agg-prompt");
+  const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_AGG_TIMEOUT_MS);
+
+  process.stdout.write(`# /grok:aggregate-review\n`);
+  process.stdout.write(`Reviewers: ${available.map(r => r.name).join(", ")}\n`);
+  process.stdout.write(`Target: ${target}${focus ? `\nFocus: ${focus}` : ""}\n`);
+  process.stdout.write(`Diff size: ${diffResult.diff.length} bytes\n\n`);
+  process.stdout.write(`Running ${available.length} reviewers in parallel (per-reviewer timeout: ${timeoutMs}ms)...\n\n`);
+
+  let results;
+  try {
+    results = await Promise.all(available.map(spec => spawnReviewer(spec, {
+      promptFile,
+      promptText: prompt,
+      model: flags.model,
+      timeoutMs
+    })));
+  } finally {
+    try { fs.unlinkSync(promptFile); } catch {}
+  }
+
+  // Per-reviewer detail
+  for (const r of results) {
+    process.stdout.write(`---\n\n## ${r.label}\n\n`);
+    process.stdout.write(`*Exit: ${r.exitCode} · ${r.elapsedMs}ms${r.timedOut ? " · TIMED OUT" : ""} · Verdict: ${r.verdict} · Blocking: ${r.blocking} · Nits: ${r.nits}*\n\n`);
+    if (r.output) process.stdout.write(r.output.trim() + "\n\n");
+    if (r.exitCode !== 0 && r.stderr) {
+      process.stdout.write(`<details><summary>stderr</summary>\n\n\`\`\`\n${r.stderr}\n\`\`\`\n\n</details>\n\n`);
+    }
+  }
+
+  // Summary table
+  process.stdout.write(`---\n\n## Summary\n\n`);
+  process.stdout.write(`| Reviewer | Verdict | Blocking | Nits | Time |\n`);
+  process.stdout.write(`|---|---|---|---|---|\n`);
+  for (const r of results) {
+    process.stdout.write(`| ${r.label} | ${r.verdict} | ${r.blocking} | ${r.nits} | ${(r.elapsedMs/1000).toFixed(1)}s |\n`);
+  }
+
+  // Aggregate exit code: 1 if any REJECT, 0 otherwise
+  const anyReject = results.some(r => r.verdict === "REJECT");
+  process.exit(anyReject ? 1 : 0);
+}
+
 async function main() {
   const [, , sub, ...rest] = process.argv;
   if (!sub) {
-    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|status|result|cancel|purge> [args...]");
+    console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|status|result|cancel|purge> [args...]");
     process.exit(2);
   }
   let args;
@@ -1382,13 +1592,14 @@ async function main() {
     case "research": return cmdResearch(args);
     case "models": return cmdModels(args);
     case "best-of": return cmdBestOf(args);
+    case "aggregate-review": return await cmdAggregateReview(args);
     case "status": return cmdStatus(args);
     case "result": return cmdResult(args);
     case "cancel": return await cmdCancel(args);
     case "purge": return cmdPurge(args);
     default:
       console.error(`Unknown subcommand: ${sub}`);
-      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|status|result|cancel|purge> [args...]");
+      console.error("Usage: companion.mjs <setup|ask|review|adversarial-review|imagine|imagine-video|task|research|models|best-of|aggregate-review|status|result|cancel|purge> [args...]");
       process.exit(2);
   }
 }

@@ -5,6 +5,44 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-05-15
+
+`/goal` round-7 (the first round where Gemini actually delivered a
+review, via the v0.8.5 CLI fallback). All 3 reviewers converged on the
+same bug in the v0.8.5 workaround itself.
+
+### Bug fixes
+
+- **3/3 reviewer consensus — fallback predicate was too greedy**.
+  v0.8.5's check `/Nothing to review/i.test(r.output)` was unanchored
+  → a real review that contained the phrase "nothing to review" in
+  prose (e.g. "nothing to review in the test utilities because...")
+  would have its real findings silently discarded and replaced with
+  a redundant CLI rerun. **Fix**: tightened to require all of:
+    1. `r.via === "peer"` (only retrying peer routing)
+    2. `r.verdict === "UNPARSED"` (a real review always has VERDICT:)
+    3. output starts with "Nothing to review" (anchored ^ regex)
+    4. output length < 400 bytes (real reviews are multi-KB)
+    5. our captureDiff DID find a non-empty diff
+
+- **Gemini MED — fallback timeout budget was effectively doubled**.
+  v0.8.5 passed the full `timeoutMs` to the CLI re-spawn, so a user
+  who configured a 10-minute timeout could end up waiting 20 minutes
+  (peer attempt + full CLI attempt). **Fix**: track wall-clock at
+  the start of the parallel batch, compute `remainingMs = max(0,
+  timeoutMs - elapsed)`, pass that to the fallback. If < 5s remains,
+  skip the fallback entirely and keep the peer result.
+
+- **Grok LOW — dead field `peerFallbackFrom`**. v0.8.5 wrote
+  `newResult.peerFallbackFrom = "peer"` but nothing ever read it.
+  Removed.
+
+### Tests
+
+- 3 new behavior tests asserting the tightened predicate shape, the
+  remaining-budget calculation, and the removed dead field.
+- Total suite: 269 passing.
+
 ## [0.8.5] - 2026-05-15
 
 Self-healing workaround for [gemini-plugin-cc#4](https://github.com/taibaran/gemini-plugin-cc/issues/4).

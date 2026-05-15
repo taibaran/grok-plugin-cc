@@ -60,6 +60,48 @@ test("commands/aggregate-review.md routes through grok:grok-aggregate-review sub
   assert.match(src, /companion\.mjs.*aggregate-review/, "documentation should still reference the underlying companion subcommand");
 });
 
+test("v0.8.6 (3/3 reviewer consensus): cli-fallback predicate is tightened — anchored + UNPARSED + short", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // The predicate must check:
+  //   1. r.via === "peer"
+  //   2. r.verdict === "UNPARSED"
+  //   3. isPeerEmptyDiffMessage(r.output) — anchored `^Nothing to review` + length < 400
+  //   4. diffResult.diff non-empty
+  // The v0.8.5 version only checked condition 1 + an UNANCHORED regex
+  // + condition 4 — which would have stomped a real review that
+  // happens to contain "nothing to review" in its prose.
+  const block = src.slice(
+    src.indexOf("v0.8.5 (gemini-plugin-cc#4 workaround)"),
+    src.indexOf("if (cliFallbacksNeeded.length > 0)")
+  );
+  assert.match(block, /isPeerEmptyDiffMessage/);
+  assert.match(block, /r\.verdict === "UNPARSED"/);
+  assert.match(block, /\^Nothing to review/,
+    "the regex must be anchored to the START of the output (not unanchored)");
+  assert.match(block, /trimmed\.length < 400/,
+    "the predicate must reject long outputs (real reviews are multi-KB)");
+});
+
+test("v0.8.6 (Gemini MED): CLI fallback uses remaining timeout budget", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // After v0.8.6, the fallback computes elapsed wall-clock + uses
+  // the remaining budget instead of doubling the user-configured
+  // timeout.
+  const block = src.slice(
+    src.indexOf("if (cliFallbacksNeeded.length > 0)"),
+    src.indexOf("for (const fb of fallbackResults)")
+  );
+  assert.match(block, /remainingMs\s*=\s*Math\.max\(\s*0,\s*timeoutMs - elapsed\s*\)/);
+  assert.match(block, /timeoutMs:\s*remainingMs/,
+    "the fallback spawn must receive remainingMs, not the original timeoutMs");
+});
+
+test("v0.8.6 (Grok LOW): dead peerFallbackFrom field removed", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  assert.equal(src.includes("peerFallbackFrom"), false,
+    "peerFallbackFrom was written but never read — removed in v0.8.6 (Grok LOW)");
+});
+
 test("agents/grok-aggregate-review.md exists with correct structure", () => {
   const src = fs.readFileSync(
     new URL("../plugins/grok/agents/grok-aggregate-review.md", import.meta.url),

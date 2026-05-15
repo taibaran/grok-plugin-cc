@@ -1877,6 +1877,10 @@ async function cmdAggregateReview({ flags, positional }) {
   process.stdout.write(`Diff size: ${diffResult.diff.length} bytes\n\n`);
   process.stdout.write(`Running ${available.length} reviewers in parallel (per-reviewer timeout: ${timeoutMs}ms)...\n\n`);
 
+  // v0.8.6 (Gemini MED): track wall-clock to compute remaining budget
+  // if a CLI fallback fires. timeoutMs is per-reviewer so this is fine.
+  const startedAtMs = Date.now();
+
   let results;
   try {
     results = await Promise.all(available.map(r => spawnReviewer(r.spec, {
@@ -1891,53 +1895,81 @@ async function cmdAggregateReview({ flags, positional }) {
       focus: focus || null
     })));
 
-    // v0.8.5 (gemini-plugin-cc#4 workaround): peer-routed gemini's
-    // `review --scope branch` is broken upstream — `git diff --
-    // <ref>...HEAD` is interpreted by git as a pathspec for a
-    // non-existent file, producing 0 bytes + exit 0 + the spurious
-    // "Nothing to review" message. When a peer reviewer returns
-    // that pattern AND our own captureDiff DID find a real diff,
-    // re-spawn with the raw CLI path (which uses our diff via
-    // --prompt-file / -p "" + stdin / etc.). This is self-healing
-    // — once gemini-plugin-cc#4 ships a fix, peer routing will
-    // produce real output and this fallback won't trigger.
+    // v0.8.5 (gemini-plugin-cc#4 workaround), tightened in v0.8.6
+    // after all 3 reviewers (Codex+Gemini+Grok) flagged a
+    // false-positive class: the original predicate matched "Nothing
+    // to review" ANYWHERE in output, so a real review that contained
+    // the phrase in prose (e.g. "there is nothing to review in the
+    // test utilities because...") would have its real findings
+    // silently discarded.
+    //
+    // The tightened predicate requires:
+    //   1. peer routing was used (r.via === "peer")
+    //   2. peer produced UNPARSED (no VERDICT: line) — a real review
+    //      always emits a verdict, so a parsed result is never the
+    //      bug we're working around
+    //   3. output is short (< 400 bytes) — the peer plugin's
+    //      early-exit message is one line; a real review is multi-KB
+    //   4. output STARTS with "Nothing to review" — anchors out
+    //      mid-prose mentions
+    //   5. our own captureDiff DID find a real diff
+    const startedAt = startedAtMs;
+    const isPeerEmptyDiffMessage = (out) => {
+      const trimmed = (out || "").trim();
+      return trimmed.length > 0 && trimmed.length < 400 &&
+        /^Nothing to review/i.test(trimmed);
+    };
     const cliFallbacksNeeded = results
       .map((r, i) => ({ r, i, spec: available[i].spec }))
       .filter(({ r }) =>
         r.via === "peer" &&
-        /Nothing to review/i.test(r.output || "") &&
+        r.verdict === "UNPARSED" &&
+        isPeerEmptyDiffMessage(r.output) &&
         diffResult.diff && diffResult.diff.trim().length > 0
       );
     if (cliFallbacksNeeded.length > 0) {
       process.stdout.write(
         `[grok-plugin] ${cliFallbacksNeeded.length} peer reviewer(s) returned ` +
-        `"Nothing to review" despite a real diff — retrying via raw CLI ` +
-        `(gemini-plugin-cc#4 workaround).\n\n`
+        `the empty-diff early-exit "Nothing to review" despite a real diff — ` +
+        `retrying via raw CLI (gemini-plugin-cc#4 workaround).\n\n`
       );
-      const fallbackResults = await Promise.all(cliFallbacksNeeded.map(async ({ r, i, spec }) => {
-        // Build a CLI-mode detection. The detect() function tells us
-        // whether a CLI binary is on PATH; if not, we keep the peer
-        // result.
-        const cliPath = which(spec.name);
-        if (!cliPath) return null;
-        const newResult = await spawnReviewer(spec, {
-          detection: { kind: "cli", path: cliPath },
-          promptFile,
-          promptText: prompt,
-          model: flags.model,
-          timeoutMs,
-          base,
-          scope: scope === "auto" ? null : scope,
-          adversarial: !!flags.adversarial,
-          focus: focus || null
-        });
-        // Tag this reviewer so the report makes clear what happened.
-        newResult.via = "cli-fallback";
-        newResult.peerFallbackFrom = "peer";
-        return { i, newResult };
-      }));
-      for (const fb of fallbackResults) {
-        if (fb) results[fb.i] = fb.newResult;
+      // v0.8.6 (Gemini MED): use REMAINING budget, not the full
+      // original timeoutMs, or the user-configured timeout would
+      // effectively double. If the peer attempt burned 4 of 10
+      // minutes, the fallback gets the remaining 6.
+      const elapsed = Date.now() - startedAt;
+      const remainingMs = Math.max(0, timeoutMs - elapsed);
+      // Don't bother retrying if there's no meaningful budget left
+      // (< 5s would just produce another spawn failure).
+      if (remainingMs < 5000) {
+        process.stdout.write(
+          `[grok-plugin] insufficient remaining timeout budget (${remainingMs}ms) for CLI fallback — keeping peer result.\n\n`
+        );
+      } else {
+        const fallbackResults = await Promise.all(cliFallbacksNeeded.map(async ({ r, i, spec }) => {
+          // Build a CLI-mode detection. If the binary isn't on PATH
+          // we keep the peer result (worse than CLI, but still better
+          // than nothing).
+          const cliPath = which(spec.name);
+          if (!cliPath) return null;
+          const newResult = await spawnReviewer(spec, {
+            detection: { kind: "cli", path: cliPath },
+            promptFile,
+            promptText: prompt,
+            model: flags.model,
+            timeoutMs: remainingMs,
+            base,
+            scope: scope === "auto" ? null : scope,
+            adversarial: !!flags.adversarial,
+            focus: focus || null
+          });
+          // Tag this reviewer so the report makes clear what happened.
+          newResult.via = "cli-fallback";
+          return { i, newResult };
+        }));
+        for (const fb of fallbackResults) {
+          if (fb) results[fb.i] = fb.newResult;
+        }
       }
     }
   } finally {

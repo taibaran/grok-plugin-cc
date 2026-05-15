@@ -5,6 +5,55 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-05-15
+
+**First stable release.** No code changes from v0.9.13 — this is a
+purely declarative cut.
+
+The plugin has been hardened through 13 rounds of multi-LLM
+`/grok:aggregate-review` against the v0.9.x line. v0.9.13 is the
+last revision the round-13 reviewers identified a (non-triggerable,
+theoretical) finding for; the v0.9.13 patch closes that finding and
+the resulting code surface is what ships as v1.0.0.
+
+### What's included
+
+20 slash commands wrapping the official xAI Grok CLI
+(github.com/xai-org, x.ai/cli):
+
+- `/grok:ask`, `/grok:task`, `/grok:research`, `/grok:rescue`
+- `/grok:review`, `/grok:adversarial-review`, `/grok:aggregate-review`
+- `/grok:imagine`, `/grok:imagine-video`
+- `/grok:best-of-n`, `/grok:model`
+- `/grok:worktree`, `/grok:sessions`, `/grok:memory`, `/grok:mcp`
+- `/grok:sandbox`, `/grok:status`, `/grok:cancel`, `/grok:result`
+- `/grok:setup`
+
+### Security baseline (v1.0.0)
+
+- Env scrubbing allowlist for the spawned `grok` child.
+- ANSI escape sanitization (4 KiB pending-escape cap).
+- TOCTOU/symlink defenses on job state reads (O_NOFOLLOW, fstat,
+  0700 chmod chain, realpath-on-fd, root-only safe-boundary check).
+- POSIX `--` terminator for literal positionals.
+- Refusal of unknown flag-like positionals by default.
+- Capability-probe gating for `--worktree`/`--continue`/`--resume`/
+  `--no-memory`/`--experimental-memory` so older grok CLIs degrade
+  cleanly instead of silently dropping flags.
+- Prompt-injection defenses for reviewer-style commands.
+
+### Stability promise
+
+v1.x will not break any of the 20 command surfaces. Internal helpers
+(`commandUsesJsonOutput`, `getSessionProvenance`, ANSI sanitizer,
+TOCTOU helpers) are not part of the public surface and may continue
+to evolve.
+
+### Tests
+
+339 tests (334 passing + 5 real-grok integration smoke tests
+skipped by default; opt-in via `GROK_INTEGRATION_TEST=1`).
+
 ## [0.9.13] - 2026-05-15
 
 `/goal` round-13 — **Gemini SHIP** ("No material regressions"), Codex

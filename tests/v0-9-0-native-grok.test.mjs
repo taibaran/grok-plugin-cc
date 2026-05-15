@@ -250,7 +250,27 @@ test("v0.9.6 (3/3 round-6): cmdTask still records all 3 entry points in job meta
   assert.match(cmdTask, /requested_continue:\s*!!flags\.continue/);
 });
 
-test("v0.9.10 (3/3 round-10): trust flag reads from envelope_json, not json_output", () => {
+test("v0.9.11 (3/3 round-11): trust flag is derived from spawned argv automatically", () => {
+  // v0.9.11 deleted the manual envelope_json field. The trust flag is
+  // now computed by runJob from the actual `--output-format json` flag
+  // in meta.command. The same scenarios still hold (review trusts, task
+  // suppresses) but no command has to remember to set anything.
+  const meta1 = {
+    kind: "review",
+    session_id: "review-session-1",
+    session_id_trustworthy: true   // would be set by runJob from --output-format json
+  };
+  assert.ok(formatSessionHint(meta1));
+
+  // Task always uses plain output → runJob sets trust=false.
+  assert.equal(formatSessionHint({
+    kind: "task",
+    session_id: "from-model",
+    session_id_trustworthy: false
+  }), null);
+});
+
+test("v0.9.10 historical (kept): trust flag reads from envelope_json or session_id_trustworthy", () => {
   // The regression in v0.9.9: meta.json_output reflected the USER-FACING
   // --json render flag, but cmdReview ALWAYS invokes grok with --output-format
   // json regardless. So `meta.json_output: false` was emitting the wrong

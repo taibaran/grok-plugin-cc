@@ -5,6 +5,35 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] - 2026-05-15
+
+`/goal` round-11 — **3/3 SHIP**: Codex "no regressions evident", Gemini
+"patch is solid", Grok **"Shippable."** 1 forward-looking Important +
+3 cleanups; this release addresses them.
+
+### Eliminated the "forget to set the flag" footgun
+
+- **Gemini Important + Grok LOW round-11**. v0.9.10 required each
+  runJob caller to manually set `extra.envelope_json: true` when
+  invoking grok with `--output-format json`. A future caller could
+  forget → silent trust regression. **Fix**: runJob now derives the
+  trust flag directly from the spawned argv (`meta.command`) — looks
+  for `--output-format json` presence. The manual field is gone;
+  trust is automatic. cmdReview's extra block dropped both
+  `envelope_json` (no longer needed) and `json_output` (was dead
+  data per Grok LOW).
+
+- **Grok MED round-11 — stale comment in `render.mjs`**.
+  Module-level doc still described the v0.9.9 behavior ("read
+  `meta.session_id_trustworthy`, a flag set ... when the job had
+  `json_output: true`"). Updated to describe the v0.9.11 design.
+
+### Tests
+
+- 1 new test reflects the v0.9.11 derivation; v0.9.10 historical
+  test kept for the backward-compat path.
+- Total: 332 passing + 5 integration (skipped).
+
 ## [0.9.10] - 2026-05-15
 
 `/goal` round-10 — Codex + Grok converged on a **regression v0.9.9

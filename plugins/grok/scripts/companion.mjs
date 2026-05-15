@@ -597,14 +597,16 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         meta.exit_code = code;
         if (parsedOut.kind === "text" && parsedOut.sessionId) {
           meta.session_id = parsedOut.sessionId;
-          // v0.9.10 (Codex P2 + Grok HIGH round-10): read meta.envelope_json
-          // (set by the command at job-creation time) instead of the
-          // ambiguous meta.json_output. envelope_json reflects whether
-          // the grok invocation itself used --output-format json (i.e.
-          // whether parseGrokJson's sessionId is authoritative).
-          // json_output (kept above for backward compat) reflects the
-          // user-facing --json render flag, which is unrelated.
-          meta.session_id_trustworthy = !!meta.envelope_json;
+          // v0.9.11 (Gemini Important + Grok LOW round-11): derive trust
+          // from the actual `--output-format json` flag in the spawned
+          // argv, NOT from a manually-set meta field. This eliminates
+          // the "command forgot to set envelope_json" footgun for any
+          // future runJob caller. The grok invocation either passed
+          // `--output-format json` or it didn't; we can read that
+          // directly from `meta.command` (set by buildJobMeta).
+          const argv = Array.isArray(meta.command) ? meta.command : [];
+          const ofIdx = argv.indexOf("--output-format");
+          meta.session_id_trustworthy = ofIdx >= 0 && argv[ofIdx + 1] === "json";
         }
         meta.ended_at = new Date().toISOString();
         writeJobMeta(meta.id, meta);
@@ -814,18 +816,11 @@ async function cmdReview({ flags, positional }, { adversarial }) {
     args,
     task_text: `${target}${focus ? ` - focus: ${focus}` : ""}`,
     extra: {
-      json_output: jsonOutput,
-      // v0.9.10 (Codex P2 + Grok HIGH round-10): the previous v0.9.9 code
-      // used `meta.json_output` (which mirrors the USER-FACING --json
-      // render flag) as the trust signal for parsed session_id. But
-      // cmdReview ALWAYS invokes grok with jsonOutput: true regardless
-      // of flags.json — it parses the JSON envelope internally then
-      // re-renders plain text when --json is not set. So
-      // meta.json_output: false was emitting the wrong trust signal,
-      // suppressing the session hint for normal /grok:review runs.
-      // Add a separate `envelope_json` field that reflects the actual
-      // grok invocation. runJob reads this for the trust decision.
-      envelope_json: true,
+      // v0.9.11: `envelope_json` and `json_output` were both removed.
+      // runJob now derives the trust signal directly from the spawned
+      // argv (looks for `--output-format json`), eliminating the
+      // "command forgot to set envelope_json" footgun. Grok LOW round-11
+      // also flagged that `json_output` was written but never read.
       model: flags.model || null,
       effort: effort || null
     }

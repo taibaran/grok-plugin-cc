@@ -967,6 +967,45 @@ function extractMediaPath(text) {
   return null;
 }
 
+// v1.0.2 (issue #5): copy the just-generated media from grok's internal
+// session dir (`~/.grok/sessions/<URL-encoded-cwd>/<session-id>/{images,
+// videos}/N.X`) to a user-specified path. The session copy is preserved
+// for `grok -r <session-id>` resume / audit — caller doesn't need to know
+// about it. Returns the absolute resolved destination on success.
+//
+// Trust model: `saveToRaw` is USER input to the plugin (typed into the
+// slash command), not model output. We trust the user with their own
+// filesystem but block control bytes (the one terminal-attack vector
+// that survives `path.resolve` + the `open --` quoting).
+//
+// Directory semantics: if `saveToRaw` ends with `/` OR resolves to an
+// existing directory, the basename of `mediaPath` is appended (matches
+// the POSIX `cp source dir/` semantics most users expect).
+function copyMediaToSaveTo(mediaPath, saveToRaw) {
+  if (typeof saveToRaw !== "string" || !saveToRaw) {
+    throw new Error("--save-to value is empty.");
+  }
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(saveToRaw)) {
+    throw new Error("--save-to value contains control bytes; refusing.");
+  }
+  let dest = path.resolve(process.cwd(), saveToRaw);
+  // Directory semantics: trailing slash OR existing directory → treat
+  // dest as a directory and append the basename of the source file.
+  const endsWithSep = saveToRaw.endsWith(path.sep) || saveToRaw.endsWith("/");
+  let isDir = false;
+  try { isDir = fs.statSync(dest).isDirectory(); } catch {}
+  if (endsWithSep || isDir) {
+    dest = path.join(dest, path.basename(mediaPath));
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  // copyFileSync follows symlinks on the destination (writes through to
+  // target) — that's correct for the user-provided destination. The
+  // source is grok's session-dir path which we've already validated
+  // with isSafeMediaPath.
+  fs.copyFileSync(mediaPath, dest);
+  return dest;
+}
+
 async function cmdImagine({ flags, positional }, { video }) {
   const description = positional.join(" ").trim();
   if (!description) {
@@ -1039,18 +1078,50 @@ async function cmdImagine({ flags, positional }, { video }) {
     process.exit(r.status ?? 1);
   }
 
+  const mediaPath = extractMediaPath(parsed.text);
+
+  // v1.0.2 (issue #5): when --save-to is supplied AND we got a safe media
+  // path back, copy the file to the user's destination before printing.
+  // The display path then reflects where the file ACTUALLY is, not the
+  // internal grok session-dir path. Failures (permission denied, disk
+  // full, source missing) surface as `saveError` instead of crashing
+  // the command — the file still exists at the internal session path,
+  // so the user can recover.
+  let savedTo = null;
+  let saveError = null;
+  if (mediaPath && isSafeMediaPath(mediaPath) && flags["save-to"]) {
+    try {
+      savedTo = copyMediaToSaveTo(mediaPath, flags["save-to"]);
+    } catch (e) {
+      saveError = e && e.message ? e.message : String(e);
+    }
+  }
+  // The path we expose to the user: the saved-to copy if successful,
+  // otherwise the internal session path. Both `--json` consumers and
+  // human-readable output use this single resolution.
+  const displayPath = savedTo || mediaPath;
+
   if (flags.json) {
     process.stdout.write(JSON.stringify({
       kind: video ? "video" : "image",
       description,
-      path: extractMediaPath(parsed.text),
+      // `path` is where the file IS NOW — preserves backward compat
+      // (old callers read .path and get the file location) while making
+      // --save-to invisible to them.
+      path: displayPath,
+      // `sessionPath` is always the internal grok session-dir path so
+      // callers that want to inspect the on-disk session can do so.
+      sessionPath: mediaPath,
+      // `savedTo` is non-null only if --save-to was supplied AND succeeded.
+      savedTo,
+      // `saveError` is non-null only if --save-to was supplied AND failed.
+      saveError,
       sessionId: parsed.sessionId || null,
       raw: parsed.text
     }, null, 2) + "\n");
     process.exit(0);
   }
 
-  const mediaPath = extractMediaPath(parsed.text);
   if (mediaPath) {
     const noun = video ? "Video" : "Image";
     // VALIDATE BEFORE PRINTING. Codex round-5 caught that the previous
@@ -1063,18 +1134,31 @@ async function cmdImagine({ flags, positional }, { video }) {
     // user can still see what was returned without the terminal being
     // attacked.
     if (isSafeMediaPath(mediaPath)) {
-      process.stdout.write(`${noun}: ${mediaPath}\n`);
+      // displayPath = savedTo if --save-to succeeded, else internal session path.
+      // savedTo paths come from path.resolve(user-input) and may include chars
+      // outside SAFE_MEDIA_PATH_PATTERN (spaces, tildes), so we cannot reuse
+      // isSafeMediaPath on them — the control-byte refusal inside
+      // copyMediaToSaveTo is sufficient, and the `open --` quoting handles
+      // shell metacharacters defensively.
+      process.stdout.write(`${noun}: ${displayPath}\n`);
       // `open --` uses the POSIX end-of-options marker so even a path
       // that somehow slipped a leading hyphen past the regex (future
       // refactor regression) cannot be reinterpreted by macOS `open` as
       // a `-aTerminal` flag. Belt-and-suspenders alongside the regex.
-      process.stdout.write(`\nOpen with:\n  open -- "${mediaPath}"\n`);
+      process.stdout.write(`\nOpen with:\n  open -- "${displayPath}"\n`);
     } else {
       // JSON.stringify escapes control characters, quotes, and backslashes,
       // so even a path full of ANSI/newline payloads renders as inert text.
       const safeDisplay = JSON.stringify(mediaPath);
       process.stdout.write(`${noun} (UNSAFE PATH): ${safeDisplay}\n`);
       process.stdout.write(`\n[grok-plugin] WARNING: returned media path contains unsafe characters; not generating an open command.\n`);
+    }
+    // v1.0.2 (issue #5): if --save-to was supplied but failed, surface
+    // the reason so the user knows why their requested path is empty.
+    // The internal session copy still exists; they can copy it manually.
+    if (saveError) {
+      process.stderr.write(`\n[grok-plugin] --save-to failed: ${saveError}\n`);
+      process.stderr.write(`[grok-plugin] The file is still available at the session path printed above.\n`);
     }
     if (parsed.sessionId) {
       // v0.9.6: use --session-id= form (matches formatSessionHint's

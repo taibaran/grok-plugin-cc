@@ -5,6 +5,70 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-16
+
+Feature + triage release driven by two more issues filed by external
+reviewer @eyalRonen1. Both triaged with the codex + gemini + grok
+multi-agent pipeline; **3/3 reviewers converged** on the same plan
+this time around.
+
+### Added
+
+- **#5 — `--save-to <path>` on `/grok:imagine` and `/grok:imagine-video`**.
+  Before v1.0.2 every imagine / imagine-video invocation forced the
+  user to parse the `Video: <internal grok session path>` stdout line
+  and `cp` to wherever the artifact actually belonged. For an 8-clip
+  commercial shoot that meant 8x parse + 8x cp on top of the actual
+  generation. The reporter described 60+ repetitions of this pattern
+  in a single session.
+  **Fix**: `--save-to <path>` flag. The plugin copies the generated
+  media from grok's internal session dir to the user-specified path
+  (creates parent dirs via mkdirp, follows POSIX `cp source dir/`
+  semantics when the destination ends with `/` or names an existing
+  directory). The internal session copy is preserved so `grok -r
+  <session-id>` resume / audit still works. On copy failure (perm
+  denied, disk full, source missing) the file remains at the internal
+  session path and the error is surfaced on stderr — generation
+  doesn't fail.
+  - `--json` output now exposes `path` (where the file IS NOW —
+    savedTo if successful, else internal), `sessionPath` (always the
+    internal grok session-dir path), `savedTo` (non-null only when
+    --save-to succeeded), and `saveError` (non-null only when
+    --save-to failed). Old callers reading `.path` keep working.
+
+### Deferred (with reason — not closed)
+
+- **#6 — `--shot-list` YAML batch mode**. Once `--save-to` ships, the
+  bash one-liner `for n in beat1 beat2 ...; do /grok:imagine-video
+  --save-to "assets/${n}.mp4" "..." & done; wait` covers the core
+  parallelism need without any plugin code. The declarative YAML
+  surface adds real value for non-bash users and CI pipelines, but
+  3/3 reviewers (codex, gemini, grok) agreed the scope cost (YAML
+  parser dependency violating the zero-dep plugin model, semaphore
+  worker pool, partial-failure aggregation, summary table renderer)
+  is not justified once #5 ships. Will revisit if user feedback
+  indicates the bash workaround isn't enough.
+
+### Security
+
+- `copyMediaToSaveTo()` refuses control bytes in the user-supplied
+  `--save-to` path (defends against terminal-attack via the `open --`
+  echo). Path traversal via `..` is allowed — the user is explicitly
+  typing an absolute or relative destination and is trusted with
+  their own filesystem (this is user input, not model output).
+
+### Tests
+
+- 9 new behavioral tests (`tests/v1-0-2-save-to.test.mjs`):
+  end-to-end copy via a fake-grok stub with a real on-disk source
+  file (asserts dest exists, contents match, session copy preserved,
+  display path reflects dest); directory semantics (existing dir,
+  trailing slash, mkdirp); control-byte refusal; `--json` shape
+  (savedTo / sessionPath / saveError) both with and without
+  --save-to; source-grep guards on COMMON_VALUE_FLAGS registration
+  and on the .md doc updates.
+- Total: 356 tests (351 passing + 5 integration skipped).
+
 ## [1.0.1] - 2026-05-16
 
 Bug-fix release driven by two issues filed against v1.0.0 by external

@@ -254,8 +254,12 @@ test("B6: imagine output uses `open --` POSIX end-of-options separator", () => {
   // Defense-in-depth alongside the regex: even if the regex ever
   // loosens and lets a leading hyphen through, `open --` ensures macOS
   // `open` parses the next arg as a file path, not a flag.
+  // v1.0.2 (issue #5): variable was renamed from mediaPath to displayPath
+  // (= savedTo || mediaPath) so --save-to destinations also get the `open`
+  // hint. The POSIX `--` guarantee still applies — assert against either
+  // variable name.
   const src = fs.readFileSync(COMPANION_PATH, "utf8");
-  assert.match(src, /open\s+--\s+"\$\{mediaPath\}"/,
+  assert.match(src, /open\s+--\s+"\$\{(?:media|display)Path\}"/,
     "imagine output must use `open -- \"...\"` (POSIX end-of-options)");
 });
 

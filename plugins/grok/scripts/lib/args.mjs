@@ -213,7 +213,13 @@ export const COMMON_VALUE_FLAGS = new Set([
   "system-prompt-override", // --system-prompt-override <prompt>
   "permission-mode",      // --permission-mode <mode>: user-selectable (plan|auto|acceptEdits|dontAsk|bypassPermissions|default)
   "agent",                // --agent <name>: pick a bundled Grok agent persona
-  "sandbox"               // --sandbox <profile>: GROK_SANDBOX equivalent
+  "sandbox",              // --sandbox <profile>: GROK_SANDBOX equivalent
+  // v1.0.2 (issue #5): --save-to on /grok:imagine + /grok:imagine-video.
+  // The plugin copies the generated media from grok's internal session
+  // dir (~/.grok/sessions/<URL-encoded-cwd>/<session>/{images,videos}/N.X)
+  // to the user-specified path. The session copy is preserved for
+  // `grok -r <id>` resume/audit.
+  "save-to"
 ]);
 
 // v0.8.0: repeatable value flags. Each occurrence appends to an array.

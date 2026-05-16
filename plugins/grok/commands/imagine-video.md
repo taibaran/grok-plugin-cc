@@ -1,6 +1,6 @@
 ---
 description: Generate a video from a text description using Grok's `/imagine-video` builtin
-argument-hint: '[--model <model>] [--effort <low|medium|high|xhigh|max>] [--timeout <duration>] [--json] <description>'
+argument-hint: '[--model <model>] [--effort <low|medium|high|xhigh|max>] [--timeout <duration>] [--save-to <path>] [--json] <description>'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
@@ -24,3 +24,4 @@ Output rules:
 - If `$ARGUMENTS` is empty, ask the user what video they want Grok to generate instead of running the command.
 - If Grok returns a content-policy refusal (no markdown link in the response), surface the raw text so the user can see Grok's reason.
 - Video generation can take several minutes. The default 15-minute timeout is conservative. If it routinely overshoots, pass `--timeout 30m` or `--timeout 0` (disable).
+- `--save-to <path>` copies the generated video to the given path (creates parent dirs if needed). If the path ends with `/` or names an existing directory, the source basename is appended. The internal session copy is preserved for `grok -r <id>` resume. On failure (permission denied, disk full) the file remains at the internal session path and the reason is printed to stderr. Useful for multi-clip workflows: `for n in beat1 beat2 ...; do /grok:imagine-video --save-to "assets/${n}.mp4" "..." & done; wait`.

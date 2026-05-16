@@ -1609,6 +1609,22 @@ function cmdBestOf({ flags, positional }) {
     console.error("Usage: best-of <N> <prompt>");
     process.exit(2);
   }
+  // v1.0.3 (issue #8): one-line stderr reminder that --best-of-n is
+  // code-task-only. grok's underlying /best-of-n skill spawns N parallel
+  // subagents in isolated git worktrees and evaluates them on Correctness
+  // / Code Quality / Safety — for text or research prompts the diff
+  // evaluator has nothing to score and you get an evaluation table over
+  // empty diffs (issue #8 reporter lost ~5x token spend before realizing).
+  // Suppressed when --json (parseable pipelines) or when the user has
+  // set GROK_PLUGIN_QUIET_BANNERS=1 (power-user opt-out, matches the
+  // grok-CLI-style GROK_* env-var convention).
+  if (!flags.json && process.env.GROK_PLUGIN_QUIET_BANNERS !== "1") {
+    process.stderr.write(
+      `[grok-plugin] /grok:best-of wraps grok --best-of-n (CODE / FILE-CHANGE tasks only — ` +
+      `scores worktree diffs). For research/summarization/text, use /grok:research or /grok:ask. ` +
+      `Suppress this banner with GROK_PLUGIN_QUIET_BANNERS=1.\n`
+    );
+  }
   const timeoutMs = resolveTimeoutMs(flags.timeout, DEFAULT_BESTOF_TIMEOUT_MS);
   // Gemini v0.6.0 round-2 G2: same case-insensitive normalization as cmdAsk.
   const effort = validateEffort(flags.effort);

@@ -177,6 +177,61 @@ export function grokVersion() {
   return (r.stdout || "").trim();
 }
 
+// v1.0.3 (issue #7): Read grok's models_cache.json to check whether a
+// given model supports `--effort` / `--reasoning-effort`. The cache is
+// populated by grok itself when you run `grok models`; we never write
+// to it. We use the cached `info.supports_reasoning_effort` flag to
+// decide whether to forward those flags — forwarding to a model that
+// doesn't support them triggers a cryptic 400 from cli-chat-proxy with
+// "Model X does not support parameter reasoningEffort", repeated 4× to
+// stderr, while the CLI exits 0. The plugin's /grok:research command
+// defaults to `--effort max`, so on the default model (grok-build, which
+// declares supports_reasoning_effort=false) every research call was
+// silently producing this 400 cascade. Strip-with-warning is preferred
+// over abort: --effort is a quality hint, not required semantics, and
+// silently aborting /grok:research on the default model would be worse
+// UX than running it without effort.
+//
+// Returns:
+//   true  — model supports the capability
+//   false — model explicitly does NOT support it
+//   null  — unknown (cache missing, model not in cache, field absent)
+//
+// `null` is treated conservatively by the caller: forward the flag and
+// let upstream handle it. Only `false` triggers the strip-with-warning.
+function readGrokModelsCache() {
+  const cachePath = path.join(os.homedir(), ".grok", "models_cache.json");
+  try {
+    const raw = fs.readFileSync(cachePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && parsed.models && typeof parsed.models === "object") {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function modelSupportsReasoningEffort(modelId, cacheOverride = undefined) {
+  // GROK_PLUGIN_DISABLE_EFFORT_GATE=1 fully bypasses the gate — used by
+  // pre-v1.0.3 tests that pre-date this gate and assume --effort always
+  // forwards (these still encode useful per-test invariants like flag
+  // ordering or case-insensitivity, but the gate would now strip the
+  // flag because grok-build declares no support). The env var is read
+  // every call so a per-test setup/teardown can flip it safely.
+  if (process.env.GROK_PLUGIN_DISABLE_EFFORT_GATE === "1") return null;
+  if (!modelId || typeof modelId !== "string") return null;
+  const cache = cacheOverride !== undefined ? cacheOverride : readGrokModelsCache();
+  if (!cache || !cache.models || typeof cache.models !== "object") return null;
+  const entry = cache.models[modelId];
+  if (!entry || !entry.info || typeof entry.info !== "object") return null;
+  const v = entry.info.supports_reasoning_effort;
+  if (v === true) return true;
+  if (v === false) return false;
+  return null;
+}
+
 // Capability probe — verify that the flags this plugin relies on actually
 // exist in the installed `grok` binary. Catches breaking changes where Grok
 // renames a flag without bumping a major version. Surfaced through /grok:setup.
@@ -513,7 +568,25 @@ export function grokBaseArgs({
     if (!EFFORT_LEVELS.has(String(effort))) {
       throw new Error(`invalid --effort: ${effort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
     }
-    args.push("--effort", String(effort));
+    // v1.0.3 (issue #7): the effective model may explicitly declare
+    // supports_reasoning_effort=false (grok-build does today). Strip
+    // --effort with a stderr warning rather than forwarding it and
+    // letting the user see a cryptic 400 cascade from the API.
+    // Check the RESOLVED model (after env/config/default fallback) —
+    // checking the raw `model` parameter would miss the common case
+    // where the user didn't pass --model and the default kicks in.
+    const resolvedModel = effectiveModel(model, cwd);
+    const supports = modelSupportsReasoningEffort(resolvedModel);
+    if (supports === false) {
+      process.stderr.write(
+        `[grok-plugin] WARNING: model '${resolvedModel}' declares supports_reasoning_effort=false ` +
+        `in ~/.grok/models_cache.json — stripping --effort=${effort} to avoid a 400 from ` +
+        `cli-chat-proxy.grok.com. Run \`grok models\` to refresh the cache, or pin --model ` +
+        `to a model that supports effort.\n`
+      );
+    } else {
+      args.push("--effort", String(effort));
+    }
   }
   if (check) args.push("--check");
   if (bestOfN != null) {
@@ -572,7 +645,20 @@ export function grokBaseArgs({
     if (!EFFORT_LEVELS.has(String(reasoningEffort))) {
       throw new Error(`invalid --reasoning-effort: ${reasoningEffort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
     }
-    args.push("--reasoning-effort", String(reasoningEffort));
+    // v1.0.3 (issue #7): same gate as --effort above. The reasoning-effort
+    // parameter goes through the same `reasoningEffort` API field on the
+    // backend and triggers the same 400 on models that don't support it.
+    // Use the resolved model (see --effort gate above for why).
+    const resolvedModelRE = effectiveModel(model, cwd);
+    const supportsRE = modelSupportsReasoningEffort(resolvedModelRE);
+    if (supportsRE === false) {
+      process.stderr.write(
+        `[grok-plugin] WARNING: model '${resolvedModelRE}' declares supports_reasoning_effort=false ` +
+        `— stripping --reasoning-effort=${reasoningEffort}.\n`
+      );
+    } else {
+      args.push("--reasoning-effort", String(reasoningEffort));
+    }
   }
   if (systemPromptOverride != null && systemPromptOverride !== "") {
     // Sanitize control bytes — system-prompt-override goes verbatim

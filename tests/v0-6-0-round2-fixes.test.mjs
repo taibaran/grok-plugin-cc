@@ -93,6 +93,17 @@ function runCompanion(fakeDir, args, extraEnv = {}) {
     encoding: "utf8",
     env: {
       ...process.env,
+      // v1.0.3 (issue #7): the per-model --effort gate in
+      // modelSupportsReasoningEffort reads the user's REAL
+      // ~/.grok/models_cache.json. For grok-build (today's default
+      // and only public model), that cache says
+      // supports_reasoning_effort=false — which would strip --effort
+      // from the subprocess argv and break these flag-emission tests.
+      // Bypass the gate inside the subprocess so the tests continue to
+      // assert the argv-construction contract. The gate itself is
+      // tested in v1-0-3-issue-fixes.test.mjs with explicit cache
+      // fixtures.
+      GROK_PLUGIN_DISABLE_EFFORT_GATE: "1",
       ...extraEnv,
       PATH: `${fakeDir}:${process.env.PATH}`
     }

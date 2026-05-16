@@ -2,7 +2,7 @@
 //   /grok:research, /grok:models, /grok:best-of
 // plus the extended grokBaseArgs builder (effort/check/bestOfN/disableWebSearch).
 
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,6 +13,15 @@ import {
   EFFORT_LEVELS,
   BEST_OF_N_MAX
 } from "../plugins/grok/scripts/lib/grok.mjs";
+
+// v1.0.3 (issue #7): bypass the per-model --effort gate added in
+// modelSupportsReasoningEffort. These tests pre-date the gate and
+// assume --effort always forwards; the gate would now strip it because
+// the user's real ~/.grok/models_cache.json declares grok-build has
+// supports_reasoning_effort=false. The bypass is scoped to this test
+// file so the gate itself stays under test in v1-0-3-issue-fixes.test.mjs.
+before(() => { process.env.GROK_PLUGIN_DISABLE_EFFORT_GATE = "1"; });
+after(() => { delete process.env.GROK_PLUGIN_DISABLE_EFFORT_GATE; });
 import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS } from "../plugins/grok/scripts/lib/args.mjs";
 import { setActiveModel, readConfig, PLUGIN_DATA_ENV } from "../plugins/grok/scripts/lib/state.mjs";
 

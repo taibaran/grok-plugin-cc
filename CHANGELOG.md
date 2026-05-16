@@ -5,6 +5,103 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-05-16
+
+Bug + docs release for two issues filed by external reviewer
+@eyalRonen1. Triaged with codex + gemini + grok agents in parallel
+— 3/3 confirmed the diagnoses, with one dissent on remediation
+style for #7 (resolved in favor of the 2/3 lenient approach).
+
+### Fixed
+
+- **#7 — `--effort` triggers cryptic 400 cascade on grok-build**.
+  Today's only public model (`grok-build`) declares
+  `supports_reasoning_effort: false` in `~/.grok/models_cache.json`,
+  but the plugin's `/grok:research` always emits `--effort max` by
+  default. Result: every research call to the default model produced
+  a 4× repeated `Internal error: { ... 400 ... }` cascade on stderr,
+  with exit 0 leaking through. **Fix**: new
+  `modelSupportsReasoningEffort()` helper in `lib/grok.mjs` reads the
+  models cache once per call. In `grokBaseArgs`, before emitting
+  `--effort` or `--reasoning-effort`, the gate checks the
+  **resolved** model (after env/config/default fallback). If the
+  model declares no support, the flag is stripped with a clear
+  stderr warning that names the model, points at the cache, and
+  suggests `grok models` to refresh or `--model <id>` to override.
+  Cache-miss or unknown-model is treated conservatively (forward the
+  flag — never silently strip when we lack data). Verified end-to-end:
+  `/grok:ask --effort high` now returns the answer + warning instead
+  of the 400 cascade.
+
+  **Reviewer convergence**: Codex + Gemini + me chose
+  lenient-strip-with-warning (preserves the flagship `/grok:research`
+  command on the default model); Grok dissented in favor of strict
+  abort (would have made `/grok:research` dead-on-arrival until the
+  user discovers `--model`). The reporter explicitly accepted either
+  option in their proposal. 2/3 vote + the dissenter's concern fully
+  mitigated by the very visible 4-line stderr warning.
+
+### Docs + UX
+
+- **#8 — `--best-of-n` is implicitly code-task-only**. grok's native
+  `/best-of-n` skill spawns N parallel subagents in isolated git
+  worktrees and evaluates them on Correctness · Code Quality ·
+  Safety. For text or research prompts the diff evaluator has
+  nothing to score, so the user gets an evaluation table over empty
+  diffs (essentially empty stdout). Reporter lost ~5× token spend
+  on a research prompt that returned 1 byte before realizing.
+  **Fix**: `commands/best-of.md` rewritten to lead with "CODE /
+  FILE-CHANGE tasks only" and direct text/research users to
+  `/grok:research` or `/grok:ask`. `cmdBestOf` in `companion.mjs`
+  also writes a one-line stderr banner on every invocation
+  reminding callers of the constraint. The banner is suppressed in
+  `--json` mode (parseable pipelines) and when
+  `GROK_PLUGIN_QUIET_BANNERS=1` is set (power-user opt-out).
+
+### Deferred (with reason)
+
+- **#8 — `--aggregate-of-n` (run N times + synthesize one answer)**.
+  Reporter's secondary request. This is the feature most text/research
+  users actually want from "best of N" — but it requires a new
+  synthesis prompt + parallel-run orchestrator + result aggregation
+  (essentially a smaller cousin of `/grok:aggregate-review`).
+  Medium-to-large feature, wrong scope for a patch release. 2/3
+  reviewers (Gemini + Grok) recommended defer; Codex argued for v1.0.3
+  inclusion. Added to v1.1.0 roadmap. Tracking in the open #8 thread.
+
+### Internal
+
+- New env var `GROK_PLUGIN_DISABLE_EFFORT_GATE=1` bypasses the per-
+  model `--effort` gate entirely. Primarily for test isolation —
+  pre-v1.0.3 unit tests assume `--effort` always forwards, which the
+  gate would otherwise break on machines where `~/.grok/models_cache.json`
+  has been populated. Three test files set it in their before/after
+  hooks. End-users can also set it if they want to roll back the gate
+  while keeping the rest of v1.0.3, but the gate's strip-with-warning
+  is the recommended path.
+
+- New env var `GROK_PLUGIN_QUIET_BANNERS=1` suppresses informational
+  stderr banners (today: just the `/grok:best-of` code-task reminder).
+  For users who already know what `--best-of-n` does and don't want
+  the line on every invocation.
+
+### Tests
+
+- 11 new behavioral tests (`tests/v1-0-3-issue-fixes.test.mjs`):
+  - `modelSupportsReasoningEffort()` returns true/false/null across
+    cache-present, cache-missing, model-missing, field-missing,
+    null/empty input cases.
+  - `grokBaseArgs` strips `--effort` and `--reasoning-effort` with
+    stderr warning when cache says unsupported.
+  - `grokBaseArgs` forwards both when cache says supported.
+  - `grokBaseArgs` forwards both when cache is missing (conservative).
+  - `cmdBestOf` prints the code-task banner to stderr, suppresses it
+    in `--json` mode, and suppresses it when
+    `GROK_PLUGIN_QUIET_BANNERS=1`.
+  - Source-grep guards on the helper export, call-site count, and the
+    `best-of.md` doc rewrite.
+- Total: 367 tests (362 passing + 5 integration skipped).
+
 ## [1.0.2] - 2026-05-16
 
 Feature + triage release driven by two more issues filed by external

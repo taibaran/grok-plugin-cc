@@ -1,7 +1,7 @@
 // v0.8.0 behavior tests — permission rule passthrough, repeatable flags,
 // capability probe regression, /grok:inspect dispatcher routing.
 
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,6 +11,14 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, COMMON_BOOL_FLAGS, COMMON_VALUE_FLAGS, COMMON_REPEATABLE_FLAGS } from "../plugins/grok/scripts/lib/args.mjs";
 import { grokBaseArgs, PERMISSION_MODES } from "../plugins/grok/scripts/lib/grok.mjs";
+
+// v1.0.3 (issue #7): pre-date the per-model --effort gate added in
+// modelSupportsReasoningEffort. Bypass it for this file so tests for
+// grokBaseArgs's effort-flag and reasoning-effort-flag emission keep
+// asserting the old "always forward" contract. The gate itself is
+// tested in v1-0-3-issue-fixes.test.mjs.
+before(() => { process.env.GROK_PLUGIN_DISABLE_EFFORT_GATE = "1"; });
+after(() => { delete process.env.GROK_PLUGIN_DISABLE_EFFORT_GATE; });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(__dirname, "../plugins/grok/scripts/companion.mjs");

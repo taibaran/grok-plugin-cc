@@ -28,7 +28,8 @@ import {
   detectAuthSource, grokBaseArgs, effectiveModel, DEFAULT_MODEL,
   cleanGrokEnv, probeWithFallback, checkMinVersion, MIN_GROK_VERSION,
   MODEL_FALLBACK_CHAIN, capabilityProbe,
-  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions, commandUsesJsonOutput
+  parseGrokJson, writePromptToTempFile, EFFORT_LEVELS, compareVersions, commandUsesJsonOutput,
+  effortFlagForModel, grokHomeDir
 } from "./lib/grok.mjs";
 import { buildReviewPrompt } from "./lib/prompts.mjs";
 import { renderJobTable, renderJobDetails, fmtTime, TerminalSanitizer, sanitizeForTerminal, formatSessionHint } from "./lib/render.mjs";
@@ -148,6 +149,29 @@ function safeUnlink(p) {
 const SAFE_MEDIA_PATH_PATTERN = /^\/[A-Za-z0-9._\/\-%@+]*$/;
 function isSafeMediaPath(p) {
   return typeof p === "string" && p.length > 0 && p.length < 4096 && SAFE_MEDIA_PATH_PATTERN.test(p);
+}
+
+// v1.0.4 (Codex P0): confine media-source paths to grok's session dir
+// before any destructive operation (today: --save-to copyFileSync).
+// Without this, a prompt-injected grok could return a markdown link
+// like `![](/etc/passwd)` and the plugin would happily read /etc/passwd
+// and write its contents to whatever --save-to path the user supplied
+// — a real local-file exfiltration vector. The display path
+// (`Image: /etc/passwd`) is already noisy enough that a user would
+// notice, but a scripted --save-to caller with the path coming from
+// --json wouldn't see the malicious path until after the copy.
+//
+// Uses path.resolve to defeat traversal attacks like
+// `${sessionsRoot}/../etc/passwd` — resolve collapses `..` segments so
+// the post-resolve prefix check is authoritative. (We do NOT realpath
+// — that would require the file to exist at check time, which is
+// fine for the copy path but unnecessary here; the source must exist
+// for copyFileSync to do anything anyway.)
+function isUnderGrokSessionsDir(p) {
+  if (typeof p !== "string" || !p) return false;
+  const sessionsRoot = path.join(grokHomeDir(), "sessions");
+  const resolved = path.resolve(p);
+  return resolved === sessionsRoot || resolved.startsWith(sessionsRoot + path.sep);
 }
 
 // ---------- subcommand: setup ----------
@@ -839,6 +863,13 @@ async function cmdReview({ flags, positional }, { adversarial }) {
       readOnly: true,
       model: flags.model,
       jsonOutput: true,
+      // v1.0.4 (Codex P0): route --effort through grokBaseArgs so the
+      // v1.0.3 model-capability gate fires. Prior to this fix, cmdReview
+      // called grokBaseArgs *without* `effort` and then `args.push`-ed
+      // --effort below — bypassing the gate entirely and re-introducing
+      // the 400 cascade on grok-build for /grok:review --effort high.
+      effort,
+      check: !!flags.check, // v0.8.0 cross-command consistency — review can self-verify too
       ...extractPolicyFlags(flags)
     });
   } catch (e) {
@@ -864,8 +895,6 @@ async function cmdReview({ flags, positional }, { adversarial }) {
 
   const args = ["--prompt-file", promptFile, ...baseArgs];
   if (flags["max-turns"] == null) args.push("--max-turns", String(DEFAULT_REVIEW_MAX_TURNS));
-  if (effort) args.push("--effort", effort);
-  if (flags.check) args.push("--check"); // v0.8.0 cross-command consistency — review can self-verify too
 
   const meta = buildJobMeta({
     kind: adversarial ? "adversarial-review" : "review",
@@ -988,6 +1017,18 @@ function copyMediaToSaveTo(mediaPath, saveToRaw) {
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(saveToRaw)) {
     throw new Error("--save-to value contains control bytes; refusing.");
   }
+  // v1.0.4 (Codex P0): confine the SOURCE path to grok's session dir.
+  // The source comes from grok's stdout (parsed markdown image link)
+  // and a prompt-injected grok could return any local file path. The
+  // chars-only isSafeMediaPath check at the call site passes /etc/passwd
+  // fine — it's the prefix check that blocks the exfiltration vector.
+  if (!isUnderGrokSessionsDir(mediaPath)) {
+    throw new Error(
+      `source media path '${mediaPath}' is outside ${grokHomeDir()}/sessions/ — ` +
+      `refusing to copy. Grok may have returned an injected path; inspect the raw ` +
+      `output (use --json to see it) before re-running.`
+    );
+  }
   let dest = path.resolve(process.cwd(), saveToRaw);
   // Directory semantics: trailing slash OR existing directory → treat
   // dest as a directory and append the basename of the source file.
@@ -1000,8 +1041,8 @@ function copyMediaToSaveTo(mediaPath, saveToRaw) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   // copyFileSync follows symlinks on the destination (writes through to
   // target) — that's correct for the user-provided destination. The
-  // source is grok's session-dir path which we've already validated
-  // with isSafeMediaPath.
+  // source is now both chars-validated (isSafeMediaPath at call site)
+  // AND prefix-validated (isUnderGrokSessionsDir above).
   fs.copyFileSync(mediaPath, dest);
   return dest;
 }
@@ -1046,7 +1087,16 @@ async function cmdImagine({ flags, positional }, { video }) {
     "-m", effectiveModel(flags.model),
     "--max-turns", "10"
   ];
-  if (effort) args.push("--effort", effort);
+  // v1.0.4 (Codex P0): route --effort through the shared
+  // effortFlagForModel helper from lib/grok.mjs. Because cmdImagine
+  // doesn't use grokBaseArgs, v1.0.3's model-capability gate was
+  // bypassed here — /grok:imagine --effort high still triggered the
+  // 4× 400 cascade on grok-build. The helper centralizes the gate so
+  // every effort emission goes through one place.
+  {
+    const gated = effortFlagForModel({ effort, model: flags.model, kind: "effort" });
+    if (gated) args.push("--effort", gated);
+  }
 
   const spawnOpts = { encoding: "utf8", env: cleanGrokEnv() };
   if (timeoutMs > 0) spawnOpts.timeout = Math.min(timeoutMs, MAX_SETTIMEOUT_MS);

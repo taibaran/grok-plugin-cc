@@ -199,8 +199,20 @@ export function grokVersion() {
 //
 // `null` is treated conservatively by the caller: forward the flag and
 // let upstream handle it. Only `false` triggers the strip-with-warning.
+// v1.0.4 (Codex P1, round-1 review): honor GROK_HOME consistently with
+// the cleanGrokEnv allowlist. The env allowlist already lets GROK_HOME
+// through to the child grok process — so an enterprise user who has
+// re-homed their grok config via GROK_HOME (per upstream docs) would
+// hit a stale or missing models_cache.json at the default ~/.grok/
+// path while grok itself reads from $GROK_HOME/. The gate would then
+// see null cache → conservative-forward → 400 cascade. Use the same
+// resolution grok itself uses.
+export function grokHomeDir() {
+  return process.env.GROK_HOME || path.join(os.homedir(), ".grok");
+}
+
 function readGrokModelsCache() {
-  const cachePath = path.join(os.homedir(), ".grok", "models_cache.json");
+  const cachePath = path.join(grokHomeDir(), "models_cache.json");
   try {
     const raw = fs.readFileSync(cachePath, "utf8");
     const parsed = JSON.parse(raw);
@@ -230,6 +242,40 @@ export function modelSupportsReasoningEffort(modelId, cacheOverride = undefined)
   if (v === true) return true;
   if (v === false) return false;
   return null;
+}
+
+// v1.0.4 (Codex P0 round-1 review): single source of truth for the
+// per-model --effort gate. v1.0.3 only enforced the gate inside
+// `grokBaseArgs`, but two callers append `--effort` outside that
+// helper — `cmdReview` (it called grokBaseArgs without `effort`, then
+// pushed `--effort` manually after) and `cmdImagine` (which doesn't
+// use grokBaseArgs at all). Both paths bypassed the gate entirely,
+// so `/grok:review --effort high` and `/grok:imagine --effort high`
+// still triggered the 4× 400 cascade on grok-build.
+//
+// This helper centralizes the gate-and-warn so every caller can
+// route their effort decision through one entry point. Returns the
+// effort value to forward (or null if stripped — caller should not
+// push the flag in that case). The `kind` argument controls the
+// warning text so we can distinguish `--effort` from `--reasoning-effort`.
+export function effortFlagForModel({ effort, model, cwd, kind = "effort" } = {}) {
+  if (effort == null || effort === "") return null;
+  if (!EFFORT_LEVELS.has(String(effort))) {
+    throw new Error(`invalid --${kind}: ${effort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
+  }
+  const resolved = effectiveModel(model, cwd);
+  const supports = modelSupportsReasoningEffort(resolved);
+  if (supports === false) {
+    const flagName = kind === "reasoning-effort" ? "--reasoning-effort" : "--effort";
+    process.stderr.write(
+      `[grok-plugin] WARNING: model '${resolved}' declares supports_reasoning_effort=false ` +
+      `in ~/.grok/models_cache.json — stripping ${flagName}=${effort} to avoid a 400 from ` +
+      `cli-chat-proxy.grok.com. Run \`grok models\` to refresh the cache, or pin --model ` +
+      `to a model that supports effort.\n`
+    );
+    return null;
+  }
+  return String(effort);
 }
 
 // Capability probe — verify that the flags this plugin relies on actually
@@ -564,29 +610,12 @@ export function grokBaseArgs({
   //    Useful for offline/repo-only reviews where you don't want sources
   //    pulled in. (Default for Grok is web search ON — that's its big
   //    differentiator against Claude's training cutoff.)
-  if (effort != null && effort !== "") {
-    if (!EFFORT_LEVELS.has(String(effort))) {
-      throw new Error(`invalid --effort: ${effort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
-    }
-    // v1.0.3 (issue #7): the effective model may explicitly declare
-    // supports_reasoning_effort=false (grok-build does today). Strip
-    // --effort with a stderr warning rather than forwarding it and
-    // letting the user see a cryptic 400 cascade from the API.
-    // Check the RESOLVED model (after env/config/default fallback) —
-    // checking the raw `model` parameter would miss the common case
-    // where the user didn't pass --model and the default kicks in.
-    const resolvedModel = effectiveModel(model, cwd);
-    const supports = modelSupportsReasoningEffort(resolvedModel);
-    if (supports === false) {
-      process.stderr.write(
-        `[grok-plugin] WARNING: model '${resolvedModel}' declares supports_reasoning_effort=false ` +
-        `in ~/.grok/models_cache.json — stripping --effort=${effort} to avoid a 400 from ` +
-        `cli-chat-proxy.grok.com. Run \`grok models\` to refresh the cache, or pin --model ` +
-        `to a model that supports effort.\n`
-      );
-    } else {
-      args.push("--effort", String(effort));
-    }
+  // v1.0.4 (Codex P0): route through the shared effortFlagForModel helper.
+  // Same gate behavior as v1.0.3 but cmdImagine and any future caller that
+  // doesn't go through grokBaseArgs can now reuse the same logic.
+  {
+    const gated = effortFlagForModel({ effort, model, cwd, kind: "effort" });
+    if (gated) args.push("--effort", gated);
   }
   if (check) args.push("--check");
   if (bestOfN != null) {
@@ -639,26 +668,10 @@ export function grokBaseArgs({
   if (noSubagents) args.push("--no-subagents");
   if (noPlan) args.push("--no-plan");
   if (verbatim) args.push("--verbatim");
-  if (reasoningEffort != null && reasoningEffort !== "") {
-    // Reasoning effort uses the same level set as --effort, but it's
-    // applied only to reasoning models. Use the same validator.
-    if (!EFFORT_LEVELS.has(String(reasoningEffort))) {
-      throw new Error(`invalid --reasoning-effort: ${reasoningEffort}. Allowed: ${[...EFFORT_LEVELS].join(",")}`);
-    }
-    // v1.0.3 (issue #7): same gate as --effort above. The reasoning-effort
-    // parameter goes through the same `reasoningEffort` API field on the
-    // backend and triggers the same 400 on models that don't support it.
-    // Use the resolved model (see --effort gate above for why).
-    const resolvedModelRE = effectiveModel(model, cwd);
-    const supportsRE = modelSupportsReasoningEffort(resolvedModelRE);
-    if (supportsRE === false) {
-      process.stderr.write(
-        `[grok-plugin] WARNING: model '${resolvedModelRE}' declares supports_reasoning_effort=false ` +
-        `— stripping --reasoning-effort=${reasoningEffort}.\n`
-      );
-    } else {
-      args.push("--reasoning-effort", String(reasoningEffort));
-    }
+  // v1.0.4 (Codex P0): same shared helper. Distinct `kind` controls warning text.
+  {
+    const gatedRE = effortFlagForModel({ effort: reasoningEffort, model, cwd, kind: "reasoning-effort" });
+    if (gatedRE) args.push("--reasoning-effort", gatedRE);
   }
   if (systemPromptOverride != null && systemPromptOverride !== "") {
     // Sanitize control bytes — system-prompt-override goes verbatim

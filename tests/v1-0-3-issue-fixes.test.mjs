@@ -301,9 +301,15 @@ test("v1.0.3: modelSupportsReasoningEffort is exported and used in grokBaseArgs"
   );
   assert.match(src, /export function modelSupportsReasoningEffort/,
     "modelSupportsReasoningEffort must be exported (for testing + external use)");
-  // Count usages: definition + 2 call sites (--effort and --reasoning-effort gates).
+  // v1.0.4 (Codex P0-A refactor): the two grokBaseArgs call sites that
+  // previously called modelSupportsReasoningEffort directly were moved
+  // behind effortFlagForModel (single source of truth for the gate),
+  // so the direct-call count dropped from 3 to 2 (1 def + 1 internal
+  // call inside effortFlagForModel). The dedicated v1.0.4 test
+  // ("effortFlagForModel is exported and used by both grokBaseArgs +
+  // cmdImagine") guards the new invariant.
   const calls = (src.match(/modelSupportsReasoningEffort\(/g) || []).length;
-  assert.ok(calls >= 3,
+  assert.ok(calls >= 2,
     `expected ≥3 occurrences (1 def + 2 calls), got ${calls}`);
 });
 

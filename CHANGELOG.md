@@ -5,6 +5,87 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-05-16
+
+Security + correctness patch driven by a deep-research review of
+v1.0.3 conducted by the codex + gemini + grok multi-agent pipeline.
+Codex caught two real P0 regressions plus one P1 inconsistency that
+the other two reviewers (and I) missed. Patched same day.
+
+### Fixed
+
+- **Codex P0-A — `--effort` gate bypass in `cmdReview` + `cmdImagine`.**
+  v1.0.3 added the per-model `--effort` gate (`modelSupportsReasoning
+  Effort`) but only enforced it inside `grokBaseArgs`. Two call sites
+  appended `--effort` outside that helper:
+  - `cmdReview` (companion.mjs ~line 838): called `grokBaseArgs`
+    *without* `effort` and then `args.push("--effort", effort)` after.
+  - `cmdImagine` (companion.mjs ~line 1049): doesn't use
+    `grokBaseArgs` at all — hand-builds the argv including `--effort`.
+  Both paths re-introduced the 4× 400 cascade on `grok-build` for
+  `/grok:review --effort high`, `/grok:adversarial-review --effort high`,
+  `/grok:imagine --effort high`, and `/grok:imagine-video --effort high`.
+  **Fix**: new `effortFlagForModel({effort, model, cwd, kind})` helper
+  in `lib/grok.mjs` is the single source of truth for the gate.
+  Returns the value to forward (or null if stripped, with stderr
+  warning). `grokBaseArgs` delegates to it for both `--effort` and
+  `--reasoning-effort`. `cmdReview` now passes `effort` through to
+  `grokBaseArgs` (and removed the manual push). `cmdImagine` calls
+  `effortFlagForModel` directly. Verified end-to-end: `/grok:imagine
+  --effort high` now produces the warning + clean output instead of
+  the 400 cascade.
+
+- **Codex P0-B — `--save-to` source-path exfiltration vector.**
+  `extractMediaPath` trusts grok's stdout completely; `isSafeMediaPath`
+  only validates characters (it approves any `/A-Za-z0-9._/-%@+` path
+  including `/etc/passwd`). A prompt-injected grok could return
+  `![pwned](/etc/passwd)` and the plugin would copy `/etc/passwd` to
+  the user's `--save-to` destination — local-file exfiltration. The
+  attack only fires when `--save-to` is used (display + open hint
+  don't read the file), but the v1.0.2 `--save-to` shipping made this
+  a practical concern.
+  **Fix**: new `isUnderGrokSessionsDir(p)` helper in `companion.mjs`
+  uses `path.resolve` (collapses `..` segments) to require the
+  resolved path equals or descends from `${GROK_HOME}/sessions/`.
+  `copyMediaToSaveTo` checks before any `copyFileSync` — refuses
+  with a clear error pointing at the prompt-injection possibility,
+  the file stays at its (legitimate or not) location, the plugin
+  exits cleanly.
+
+### Fixed (P1 bundled)
+
+- **Codex P1 — `GROK_HOME` consistency.** `cleanGrokEnv` allows
+  `GROK_HOME` through to the child grok process (enterprise users
+  with re-homed grok configs depend on this), but
+  `readGrokModelsCache` hardcoded `~/.grok/models_cache.json`. An
+  enterprise user with a re-homed grok would have the v1.0.3 gate
+  see null cache → conservative-forward → 400 cascade.
+  **Fix**: new exported `grokHomeDir()` helper resolves `GROK_HOME ||
+  ~/.grok`. `readGrokModelsCache` and `isUnderGrokSessionsDir` both
+  use it — same resolution as grok itself.
+
+### Tests
+
+- 13 new behavioral tests in `tests/v1-0-4-issue-fixes.test.mjs`:
+  - `effortFlagForModel` unit tests across supported/unsupported/
+    unset/invalid/reasoning-effort cases.
+  - End-to-end: `/grok:imagine --effort high` strips + warns when
+    cache says unsupported, forwards when cache says supported.
+  - End-to-end: `--save-to` refuses to copy `/etc/hosts` (injection
+    rejection), allows copy from legitimate session-dir source.
+  - `grokHomeDir` returns `GROK_HOME` or falls back to `~/.grok`.
+  - The gate reads cache from `GROK_HOME`, not hardcoded `~/.grok`.
+  - Source-grep guards on helper export, call-site count, and the
+    `copyMediaToSaveTo` confinement check.
+- Existing v1-0-2-save-to.test.mjs updated to put fake session-dir
+  fixtures under `${GROK_HOME}/sessions/` so the new gate accepts
+  them (using a per-test fakeHome and `GROK_HOME` on the subprocess).
+- One v1-0-3 source-grep test relaxed (call count dropped from 3 to
+  2 because `grokBaseArgs` no longer calls `modelSupportsReasoning
+  Effort` directly — it delegates via `effortFlagForModel`). The
+  invariant is now guarded by the v1.0.4 test instead.
+- Total: 380 tests (375 passing + 5 integration skipped).
+
 ## [1.0.3] - 2026-05-16
 
 Bug + docs release for two issues filed by external reviewer

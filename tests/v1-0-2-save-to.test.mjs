@@ -32,8 +32,17 @@ const COMPANION = path.resolve(__dirname, "../plugins/grok/scripts/companion.mjs
 // This lets the plugin's --save-to copy logic actually execute against
 // a real source file, so we test the END-TO-END behavior (copy happened,
 // dest file exists, contents match), not just source-grep guards.
-function makeFakeGrokDir(t, { sessionDir }) {
+// v1.0.4 (Codex P0): the fake media file MUST live under
+// <GROK_HOME>/sessions/ for the plugin's tightened source-path gate
+// (isUnderGrokSessionsDir) to accept the copy. We create a fakeHome
+// per test, mkdir GROK_HOME/sessions/<workspace>/<uuid>/videos/, and
+// pass GROK_HOME=<fakeHome> to the spawned companion so it resolves
+// the sessions root to our test fixture.
+function makeFakeGrokDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-v102-"));
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-v102-"));
+  const sessionDir = path.join(fakeHome, "sessions", "fake-workspace", "session-uuid-v102");
+  fs.mkdirSync(sessionDir, { recursive: true });
   const fakeMediaPath = path.join(sessionDir, "videos", "1.mp4");
   fs.mkdirSync(path.dirname(fakeMediaPath), { recursive: true });
   fs.writeFileSync(fakeMediaPath, "FAKE_MP4_CONTENT_v102_save_to_test");
@@ -68,9 +77,9 @@ process.exit(0);
   fs.chmodSync(grokScript, 0o755);
   t.after(() => {
     fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(fakeHome, { recursive: true, force: true });
   });
-  return { dir, fakeMediaPath };
+  return { dir, fakeMediaPath, fakeHome };
 }
 
 function runCompanion(fakeDir, args, extraEnv = {}) {
@@ -89,13 +98,12 @@ function runCompanion(fakeDir, args, extraEnv = {}) {
 // ============================================================================
 
 test("v1.0.2 (issue #5): --save-to copies the generated media to the user's path", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
   const destDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-dest-"));
   const destPath = path.join(destDir, "beat1.mp4");
   t.after(() => fs.rmSync(destDir, { recursive: true, force: true }));
 
-  const { dir: fakeDir, fakeMediaPath } = makeFakeGrokDir(t, { sessionDir });
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "a red apple"]);
+  const { dir: fakeDir, fakeMediaPath, fakeHome } = makeFakeGrokDir(t);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "a red apple"], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   // 1. The dest file actually exists.
@@ -117,13 +125,12 @@ test("v1.0.2 (issue #5): --save-to copies the generated media to the user's path
 });
 
 test("v1.0.2 (issue #5): --save-to to an existing directory appends the source basename", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
   const destDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-destdir-"));
   t.after(() => fs.rmSync(destDir, { recursive: true, force: true }));
 
-  const { dir: fakeDir } = makeFakeGrokDir(t, { sessionDir });
+  const { dir: fakeDir, fakeHome } = makeFakeGrokDir(t);
   // Pass the existing directory itself as --save-to (no trailing slash, no basename).
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destDir, "a red apple"]);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destDir, "a red apple"], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   // The plugin should have appended "1.mp4" (basename of fake source) to destDir.
@@ -133,13 +140,12 @@ test("v1.0.2 (issue #5): --save-to to an existing directory appends the source b
 });
 
 test("v1.0.2 (issue #5): --save-to with trailing slash appends the source basename", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
   const destDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-destslash-"));
   t.after(() => fs.rmSync(destDir, { recursive: true, force: true }));
 
-  const { dir: fakeDir } = makeFakeGrokDir(t, { sessionDir });
+  const { dir: fakeDir, fakeHome } = makeFakeGrokDir(t);
   // Pass the directory WITH a trailing slash — should also trigger basename append.
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destDir + "/", "a red apple"]);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destDir + "/", "a red apple"], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   const expectedDest = path.join(destDir, "1.mp4");
@@ -148,14 +154,13 @@ test("v1.0.2 (issue #5): --save-to with trailing slash appends the source basena
 });
 
 test("v1.0.2 (issue #5): --save-to creates missing parent dirs (mkdirp)", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
   const destBase = fs.mkdtempSync(path.join(os.tmpdir(), "grok-mkdirp-"));
   // Deeply nested path that doesn't exist yet.
   const destPath = path.join(destBase, "shots", "v8", "beat3.mp4");
   t.after(() => fs.rmSync(destBase, { recursive: true, force: true }));
 
-  const { dir: fakeDir } = makeFakeGrokDir(t, { sessionDir });
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "..."]);
+  const { dir: fakeDir, fakeHome } = makeFakeGrokDir(t);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "..."], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   assert.ok(fs.existsSync(destPath),
@@ -163,15 +168,14 @@ test("v1.0.2 (issue #5): --save-to creates missing parent dirs (mkdirp)", t => {
 });
 
 test("v1.0.2 (issue #5): --save-to refuses control bytes (terminal-attack defense)", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
-  const { dir: fakeDir } = makeFakeGrokDir(t, { sessionDir });
+  const { dir: fakeDir, fakeHome } = makeFakeGrokDir(t);
   // --save-to value with an embedded ANSI escape byte (\x1b). Node's
   // spawnSync rejects NUL (\x00) at the argv boundary itself, so we use
   // ESC instead — same defense, but actually reaches the companion.
   // If the companion accepted it, the ESC would corrupt the terminal
   // when echoed back in the `open --` hint.
   const evilPath = "/tmp/grok-evil\x1b[2J.mp4";
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", evilPath, "..."]);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", evilPath, "..."], { GROK_HOME: fakeHome });
 
   // The companion should still exit 0 (generation succeeded). The --save-to
   // step surfaces an error AND falls back to the internal session path so
@@ -185,13 +189,12 @@ test("v1.0.2 (issue #5): --save-to refuses control bytes (terminal-attack defens
 // ============================================================================
 
 test("v1.0.2 (issue #5): --save-to + --json exposes both savedTo and sessionPath", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
   const destDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jsondest-"));
   const destPath = path.join(destDir, "beat1.mp4");
   t.after(() => fs.rmSync(destDir, { recursive: true, force: true }));
 
-  const { dir: fakeDir, fakeMediaPath } = makeFakeGrokDir(t, { sessionDir });
-  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "--json", "..."]);
+  const { dir: fakeDir, fakeMediaPath, fakeHome } = makeFakeGrokDir(t);
+  const r = runCompanion(fakeDir, ["imagine-video", "--save-to", destPath, "--json", "..."], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   const obj = JSON.parse(r.stdout);
@@ -213,9 +216,8 @@ test("v1.0.2 (issue #5): --save-to + --json exposes both savedTo and sessionPath
 });
 
 test("v1.0.2 (issue #5): --json WITHOUT --save-to preserves the existing shape (path=session)", t => {
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-session-"));
-  const { dir: fakeDir, fakeMediaPath } = makeFakeGrokDir(t, { sessionDir });
-  const r = runCompanion(fakeDir, ["imagine-video", "--json", "..."]);
+  const { dir: fakeDir, fakeMediaPath, fakeHome } = makeFakeGrokDir(t);
+  const r = runCompanion(fakeDir, ["imagine-video", "--json", "..."], { GROK_HOME: fakeHome });
 
   assert.equal(r.status, 0, `companion exited ${r.status}: ${r.stderr}`);
   const obj = JSON.parse(r.stdout);

@@ -5,6 +5,70 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-05-16
+
+Bug-fix release driven by two issues filed against v1.0.0 by external
+reviewer @eyalRonen1. Both issues triaged with the codex + gemini +
+grok multi-agent pipeline; 2/3 reviewers converged on fix-now within
+minutes and the third agreed. Two additional feature-request issues
+(#3, #4) were investigated and deferred — the underlying Grok CLI's
+builtin `/imagine`/`/imagine-video` slash commands take only a text
+prompt and do not accept the requested flags (`--init-image`,
+`--aspect-ratio`); shipping a plugin flag that the CLI cannot honor
+would be cargo-cult UX.
+
+### Fixed
+
+- **#1 — `grok` 0.1.211 auto-update silently breaks all plugin calls**.
+  The 0.1.211 release of the upstream `grok` binary returns exit 0
+  with empty stdout/stderr for every command including `--version`.
+  v1.0.0 had no diagnostic — the user saw `exit 1` (or no output) and
+  had to test `grok --version` manually to find the broken binary.
+  **Fix**: `grokVersion()` in `lib/grok.mjs` now distinguishes three
+  states (null = couldn't run / "" = exit 0 with empty output / "grok
+  X.Y.Z" = real version). `cmdSetup` checks for the empty case and
+  surfaces a 3-step recovery path: try `grok update` → roll back via
+  `~/.grok/downloads/` → reinstall. The JSON output (`/grok:setup
+  --json`) also sets `grok.broken: true` so hooks can route on it.
+
+- **#2 — `companion.mjs` swallows underlying grok errors**. When the
+  spawned `grok` child exited with both stdout AND stderr empty (the
+  exact #1 failure mode, plus any other "silent crash" case), the
+  plugin printed nothing — the operator got an opaque non-zero exit
+  with no diagnostic. **Fix**: new `diagnoseEmptySpawnFailure()`
+  helper in `companion.mjs` prints the exit code, the shell-quoted
+  argv (paste-back ready), and the same 3-step recovery hints from
+  #1. Called from all three subprocess paths: `runHeadlessGrok` (ask,
+  research, models, best-of, mcp/memory/sessions/worktree
+  subcommands), `cmdImagine` (imagine + imagine-video), and `runJob`
+  (background tasks for rescue + task + the long-running review
+  paths). The diagnostic fires for empty output regardless of exit
+  code — exit 0 with no output is also anomalous.
+
+### Deferred (with reason — not closed)
+
+- **#3 — `--init-image` for image-to-video**. Verified locally that
+  `grok -p "/imagine-video --help"` is interpreted as a video-of-text
+  prompt by the builtin slash command (the CLI returns a video of
+  the literal string `"--help"`). The xAI REST API may support
+  image-to-video via `image_url`, but the local `grok` CLI does not
+  expose that parameter to its builtin slash commands. Will revisit
+  when upstream `github.com/xai-org/grok` adds CLI-level support.
+
+- **#4 — `--aspect-ratio` for imagine/imagine-video**. Same finding
+  as #3: the builtin `/imagine` and `/imagine-video` slash commands
+  consume their entire input as the description text and do not
+  parse flags. Will revisit when upstream adds flag support to these
+  slash commands.
+
+### Tests
+
+- 8 new behavioral tests (`tests/v1-0-1-issue-fixes.test.mjs`):
+  cmdImagine + runHeadlessGrok + cmdSetup diagnostics across exit-0
+  and exit-1 empty-output cases, plus source-grep guards on the
+  helper and the three-state contract on `grokVersion`.
+- Total: 347 tests (342 passing + 5 integration skipped).
+
 ## [1.0.0] - 2026-05-15
 
 **First stable release.** No code changes from v0.9.13 — this is a

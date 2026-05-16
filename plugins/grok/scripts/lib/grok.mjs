@@ -162,9 +162,19 @@ export function which(cmd) {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
+// v1.0.1 (issue #1): grokVersion now distinguishes three states so the
+// caller can detect a broken-binary auto-update where `grok --version`
+// exits 0 but prints nothing (observed on the 0.1.210→0.1.211 update).
+//   - null         : could not run grok --version (exit != 0 or spawn error)
+//   - ""           : exited 0 but printed empty output (binary is broken)
+//   - "grok 0.1.."  : real version line
+// Returning "" instead of null in the broken-binary case lets cmdSetup
+// surface a specific actionable hint about rolling back via ~/.grok/downloads/
+// rather than the generic "could not parse version" message.
 export function grokVersion() {
   const r = spawnSync("grok", ["--version"], { encoding: "utf8", env: cleanGrokEnv() });
-  return r.status === 0 ? r.stdout.trim() : null;
+  if (r.status !== 0) return null;
+  return (r.stdout || "").trim();
 }
 
 // Capability probe — verify that the flags this plugin relies on actually

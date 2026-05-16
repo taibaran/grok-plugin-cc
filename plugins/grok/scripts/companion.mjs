@@ -181,14 +181,30 @@ function cmdSetup({ flags }) {
   if (grokBin) {
     result.grok.available = true;
     const rawVer = grokVersion();
-    result.grok.detail = rawVer || "installed";
-    const verCheck = checkMinVersion(rawVer);
-    result.grok.version_ok = verCheck.ok;
-    if (!verCheck.ok) {
-      result.grok.version_warning = verCheck.reason;
+    // v1.0.1 (issue #1): distinguish "version line printed" from "binary
+    // exited 0 with empty output" — the latter is the broken-auto-update
+    // failure mode where setup needs to surface a recovery hint, not a
+    // generic version-warning. grokVersion() returns "" for that case.
+    if (rawVer === "") {
+      result.grok.detail = "installed but returns empty output";
+      result.grok.broken = true;
+      result.grok.version_ok = false;
       result.nextSteps.push(
-        `Upgrade Grok CLI: \`grok update\` (or reinstall via \`curl -fsSL https://x.ai/cli/install.sh | bash\`). Plugin requires >= ${MIN_GROK_VERSION}; detected ${verCheck.current || "unknown"}.`
+        "Grok CLI returned empty output for `grok --version` — likely a broken auto-update. Try (in order):\n" +
+        "  1. `grok update` to reinstall the latest version, OR\n" +
+        "  2. Roll back: `ls ~/.grok/downloads/` then `ln -sf ../downloads/<previous-binary> ~/.grok/bin/grok`, OR\n" +
+        "  3. Reinstall: `curl -fsSL https://x.ai/cli/install.sh | bash`"
       );
+    } else {
+      result.grok.detail = rawVer || "installed";
+      const verCheck = checkMinVersion(rawVer);
+      result.grok.version_ok = verCheck.ok;
+      if (!verCheck.ok) {
+        result.grok.version_warning = verCheck.reason;
+        result.nextSteps.push(
+          `Upgrade Grok CLI: \`grok update\` (or reinstall via \`curl -fsSL https://x.ai/cli/install.sh | bash\`). Plugin requires >= ${MIN_GROK_VERSION}; detected ${verCheck.current || "unknown"}.`
+        );
+      }
     }
   } else {
     result.grok.detail = "not installed";
@@ -277,6 +293,34 @@ function cmdSetup({ flags }) {
 // AND in stop-review-gate-hook.mjs::parseGrokJsonEnvelope). Imported
 // above. The two-parser drift Codex flagged is closed.
 
+// ---------- shared failure diagnostics (v1.0.1, issues #1+#2) ----------
+//
+// When the spawned `grok` child exits with both stdout AND stderr empty,
+// the user previously got an opaque non-zero exit with no signal at all
+// (observed during the 0.1.210→0.1.211 auto-update where the new binary
+// returned empty for every command). The fix: always print the exit
+// code, the command argv (shell-quoted so it pastes back), and a recovery
+// hint. Used by runHeadlessGrok, cmdImagine, and runJob.
+function shellQuoteArgv(argv) {
+  return argv.map(a => {
+    if (a == null) return "";
+    const s = String(a);
+    if (/[\s"'$`\\<>|;&*?(){}#!]/.test(s) || s.includes("\n")) return JSON.stringify(s);
+    return s;
+  }).join(" ");
+}
+function diagnoseEmptySpawnFailure({ args, status, label }) {
+  const cmdStr = shellQuoteArgv(["grok", ...args]);
+  process.stderr.write(
+    `\n[grok-plugin] ${label}: grok exited ${status ?? "?"} with empty stdout and stderr.\n` +
+    `[grok-plugin] Command: ${cmdStr}\n` +
+    `[grok-plugin] The grok binary may be broken (possible bad auto-update). Try:\n` +
+    `[grok-plugin]   1. /grok:setup     — verify the binary is healthy\n` +
+    `[grok-plugin]   2. grok update     — reinstall the latest version\n` +
+    `[grok-plugin]   3. ls ~/.grok/downloads/ && ln -sf ../downloads/<previous-binary> ~/.grok/bin/grok — roll back\n`
+  );
+}
+
 // ---------- shared headless dispatcher (v0.6.0 refactor) ----------
 //
 // cmdAsk, cmdResearch, and cmdBestOf used to each carry their own ~30-line
@@ -357,6 +401,13 @@ function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
     if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
     const why = classifyAuthBlob((r.stdout || "") + "\n" + (r.stderr || ""));
     if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+  }
+  // v1.0.1 (issue #2): empty stdout + empty stderr is anomalous — the user
+  // gets no signal otherwise. Surface the exit code and the full argv so
+  // they can either re-run manually or rule out a broken-binary case.
+  // Exit code: preserve r.status semantics; the diagnostic is the signal.
+  if (!r.stdout && !r.stderr) {
+    diagnoseEmptySpawnFailure({ args, status: r.status, label });
   }
   process.exit(r.status ?? 0);
 }
@@ -619,6 +670,12 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         if (errBuf) process.stderr.write(sanitizeForTerminal(errBuf));
         const why = classifyAuthBlob(outBuf + "\n" + errBuf);
         if (why) process.stderr.write(`\n[hint: ${why}. Run /grok:setup.]\n`);
+        // v1.0.1 (issue #2): when both buffers are empty in a non-zero exit,
+        // surface the argv + recovery hints so the user isn't left guessing.
+        // Matches the same anomaly we diagnose in runHeadlessGrok/cmdImagine.
+        if (!outBuf && !errBuf) {
+          diagnoseEmptySpawnFailure({ args: meta.command.slice(1), status: code, label: `Job ${meta.id}` });
+        }
       }
 
       resolve({ code, outBuf, errBuf, timedOut, diskOverflowed, parsedOut });
@@ -973,6 +1030,12 @@ async function cmdImagine({ flags, positional }, { video }) {
   if (parsed.kind !== "text") {
     if (r.stdout) process.stdout.write(sanitizeForTerminal(r.stdout));
     if (r.stderr) process.stderr.write(sanitizeForTerminal(r.stderr));
+    // v1.0.1 (issue #2): empty stdout + empty stderr is anomalous — the
+    // broken-binary auto-update case from issue #1 hits exactly here. Print
+    // the argv + recovery hints so the user has something actionable.
+    if (!r.stdout && !r.stderr) {
+      diagnoseEmptySpawnFailure({ args, status: r.status, label: video ? "imagine-video" : "imagine" });
+    }
     process.exit(r.status ?? 1);
   }
 

@@ -698,6 +698,16 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
           // silently suppressed trust for any caller using inline.
           meta.session_id_trustworthy = commandUsesJsonOutput(meta.command);
         }
+        // v1.0.6 (issue #10): mark `no_output` on meta when the job
+        // exits with no stdout AND no stderr. cmdResult and downstream
+        // subagents (grok-rescue, grok-aggregate-review) can route on
+        // this to surface a recovery hint instead of showing "(empty)".
+        // Whitespace-only is treated as empty too — matches v1.0.5's
+        // `isWhitespaceOnly` rule from the runHeadlessGrok/cmdImagine
+        // paths.
+        if (isWhitespaceOnly(outBuf) && isWhitespaceOnly(errBuf)) {
+          meta.no_output = true;
+        }
         meta.ended_at = new Date().toISOString();
         writeJobMeta(meta.id, meta);
       }
@@ -718,6 +728,16 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         if (isWhitespaceOnly(outBuf) && isWhitespaceOnly(errBuf)) {
           diagnoseEmptySpawnFailure({ args: meta.command.slice(1), status: code, label: `Job ${meta.id}` });
         }
+      } else if (meta.no_output && meta.status !== "cancelled") {
+        // v1.0.6 (issue #10): exit-0 with no output is the FOURTH silent-
+        // failure pattern (after v1.0.1 broken-binary, v1.0.5 1-byte newline
+        // in runHeadlessGrok/cmdImagine). Previously runJob's diagnostic
+        // was gated by `code !== 0 || grokInternalError`, so a clean exit
+        // with empty log files (the issue #10 case — `companion.mjs task`
+        // returns "completed" + empty stdout/stderr) slipped past silently.
+        // The reporter's grok-rescue agent hung waiting for non-existent
+        // output. Always surface the anomaly so callers can act on it.
+        diagnoseEmptySpawnFailure({ args: meta.command.slice(1), status: code, label: `Job ${meta.id}` });
       }
 
       resolve({ code, outBuf, errBuf, timedOut, diskOverflowed, parsedOut });
@@ -1434,6 +1454,22 @@ function cmdResult({ positional }) {
     } else {
       process.stdout.write(sanitizeForTerminal(raw || "(no output)\n"));
     }
+  }
+  // v1.0.6 (issue #10): surface the empty-output anomaly here too. The
+  // runJob-close diagnostic only fires once at task time; if the user
+  // discovers the empty output later via /grok:result, the cause/recovery
+  // hints aren't available unless we replay them. Gate on meta.no_output
+  // (set by runJob when both buffers are whitespace-only on exit 0).
+  if (meta.no_output) {
+    process.stderr.write(
+      `\n[grok-plugin] WARNING: this job produced NO output (stdout + stderr both empty) ` +
+      `even though it exited ${meta.exit_code ?? "0"}. Possible causes:\n` +
+      `[grok-plugin]   - The prompt hit an upstream silent-abort path (see issues #9/#10)\n` +
+      `[grok-plugin]   - --permission-mode plan + headless -p may suppress output when the task\n` +
+      `[grok-plugin]     requires tool execution (web_search, file ops). /grok:task uses plan mode\n` +
+      `[grok-plugin]     in read-only by default; try /grok:rescue --write for tool-using tasks.\n` +
+      `[grok-plugin]   - The grok binary may be broken (see /grok:setup).\n`
+    );
   }
   if (meta.exit_code && meta.exit_code !== 0) {
     console.log("\n## Errors\n");

@@ -5,6 +5,101 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-05-16
+
+Two-part patch for issue #10 (eyalRonen1): `companion.mjs task`
+returned "completed exit 0" with empty stdout+stderr log files,
+breaking the `grok-rescue` subagent. Triaged with codex + gemini
+in parallel; both confirmed the same diagnostic-gate bug AND
+identified a related cross-plugin state-dir collision.
+
+### Fixed
+
+- **runJob diagnostic-gate bug**: in v1.0.1 we shipped
+  `diagnoseEmptySpawnFailure` to surface silent failures. v1.0.5
+  tightened the check to `isWhitespaceOnly(stdout) && isWhitespace
+  Only(stderr)`. But the call site inside `runJob`'s close handler
+  was nested inside `(code !== 0 || grokInternalError)`. **Exit 0
+  with empty output AND no parseable JSON error envelope fell into
+  the `else` branch (status=completed), and the diagnostic was
+  silently skipped.** Reporter's `companion.mjs task` showed
+  "Job xxx completed (exit 0)" with 0-byte logs — they had no way
+  to know what went wrong.
+  - **Fix**: `runJob` now sets `meta.no_output = true` whenever
+    both buffers are whitespace-only on close. A new
+    `else if (meta.no_output && status !== "cancelled")` branch
+    after the existing error gate fires the diagnostic on exit 0
+    too.
+  - `cmdResult` now also surfaces a warning when `meta.no_output`
+    is true, so users who discover the empty output later via
+    `/grok:result` get the same recovery hints (mentions `/grok:
+    rescue --write` for tool-using tasks, `/grok:setup` for broken
+    binary, and the issue-#9/#10 upstream silent-abort pattern).
+  - The job status itself stays `completed` for exit 0 — `no_output`
+    is the structured signal, not a status change. Downstream
+    subagents (`grok-rescue`, `grok-aggregate-review`) can route on
+    `meta.no_output` to retry or fall back rather than relying on
+    text-matching the diagnostic.
+
+- **Cross-plugin state-dir collision**: the reporter's grok job
+  state landed under `~/.claude/plugins/data/codex-openai-codex/
+  state/...`. Root cause: Claude Code's harness sets
+  `CLAUDE_PLUGIN_DATA` to the calling plugin's data dir, which is
+  inherited by child processes. When grok-plugin-cc is invoked
+  from a parent subagent of a DIFFERENT plugin (e.g. codex-rescue
+  delegating to grok-rescue), our `state.mjs` saw the parent's
+  data dir and wrote our state into their namespace. Not strictly
+  a bug in our code, but a real surprise for operators auditing
+  data dirs.
+  - **Fix**: `stateDir()` now prefixes the env-backed base with
+    `grok-plugin-cc/`, mirroring the `/tmp/grok-plugin-cc/`
+    namespace baked into `FALLBACK_STATE_ROOT`. Paths become
+    `$CLAUDE_PLUGIN_DATA/grok-plugin-cc/state/<slug>-<hash>/`
+    regardless of which plugin owns the env-set base dir.
+  - **Back-compat note**: pre-v1.0.6 job state at
+    `$CLAUDE_PLUGIN_DATA/state/<slug>-<hash>/` becomes inaccessible
+    after upgrade. Job logs are ephemeral (pruned at `MAX_JOBS=50`),
+    configs are recreated by `/grok:setup`. Acceptable for a patch
+    release; users can manually move old state if they want
+    historical jobs preserved.
+
+### Investigated but NOT changed
+
+- Codex's secondary hypothesis was that `--permission-mode plan`
+  (set by `cmdTask` for read-only mode) suppresses tool execution
+  in headless `-p` mode, leading to empty output for prompts that
+  need `web_search`. **A/B test refuted this**: both `--permission-
+  mode plan` and `--permission-mode default` produced legitimate
+  output (real weather data via web_search) for the same prompt.
+  `cmdTask`'s default permission-mode stays `plan` for read-only.
+  The reporter's specific case is probably the same upstream
+  silent-abort pattern as issue #9 (prompt content containing
+  tool-error-like text confusing the model).
+
+### Tests
+
+- 10 new behavioral tests in `tests/v1-0-6-issue-10.test.mjs`:
+  - `stateDir` / `jobsDir` namespacing under `grok-plugin-cc/`.
+  - Fallback path (no env) still works.
+  - `/grok:task` with exit 0 + empty output triggers diagnostic
+    (the actual issue-#10 case).
+  - `/grok:task` with exit 1 + empty output still triggers (regression
+    guard for the pre-v1.0.6 behavior).
+  - `meta.no_output = true` is persisted to disk on the empty case.
+  - `/grok:result` surfaces the warning when reading a `no_output`
+    job, with `--write` hint.
+  - Source-grep guards on all three code-level invariants.
+- One v0.4.0 test (B5 cmdResult source-grep) had its slice size
+  bumped from 2500 → 5000 chars because the cmdResult function grew
+  with the new `no_output` warning block.
+- Total: 396 tests (391 passing + 5 integration skipped).
+
+### Credit
+
+Thanks to @eyalRonen1 for the detailed repro, including the smoking-
+gun observation about `codex-openai-codex/state/...` paths — that's
+what made the cross-plugin namespace collision obvious.
+
 ## [1.0.5] - 2026-05-16
 
 Diagnostic-tightening patch driven by issue #9, filed by external

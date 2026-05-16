@@ -43,8 +43,23 @@ export function stateDir(cwd = process.cwd()) {
   const slug =
     slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  // v1.0.6 (Gemini, issue #10): namespace-isolate our state under
+  // `grok-plugin-cc/` inside $CLAUDE_PLUGIN_DATA. CLAUDE_PLUGIN_DATA
+  // inherits to child processes — if our plugin is invoked from a
+  // parent subagent of a DIFFERENT plugin (codex/gemini), we'd
+  // otherwise write our jobs+configs+logs into that plugin's data
+  // directory (reporter of issue #10 saw their grok job state under
+  // `~/.claude/plugins/data/codex-openai-codex/state/...`). The
+  // FALLBACK_STATE_ROOT (`/tmp/grok-plugin-cc`) already has the
+  // namespace baked in; mirror that under the env-set path.
+  //
+  // Back-compat note: pre-v1.0.6 job state at
+  // `${CLAUDE_PLUGIN_DATA}/state/<slug>-<hash>/` becomes inaccessible
+  // after upgrade. Job logs are ephemeral (pruned at MAX_JOBS=50),
+  // configs are recreated by /grok:setup — acceptable for a patch
+  // release. Old jobs files can be manually moved if needed.
   const base = process.env[PLUGIN_DATA_ENV]
-    ? path.join(process.env[PLUGIN_DATA_ENV], "state")
+    ? path.join(process.env[PLUGIN_DATA_ENV], "grok-plugin-cc", "state")
     : FALLBACK_STATE_ROOT;
   return path.join(base, `${slug}-${hash}`);
 }

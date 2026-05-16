@@ -171,7 +171,10 @@ test("B5: companion.mjs::cmdResult uses TOCTOU-safe readBoundedJobLog with a cap
   const src = fs.readFileSync(COMPANION_PATH, "utf8");
   const start = src.indexOf("function cmdResult(");
   assert.ok(start >= 0);
-  const slice = src.slice(start, start + 2500);
+  // v1.0.6: cmdResult grew (added no_output diagnostic banner) so the
+  // old 2500-byte slice no longer contains the stderr branch. Bumped
+  // to 5000 to keep the source-grep stable across reasonable growth.
+  const slice = src.slice(start, start + 5000);
   assert.match(slice, /readBoundedJobLog\(meta\.stdout_path,\s*undefined,\s*MAX_REVIEW_JSON_BYTES\)/,
     "cmdResult must use readBoundedJobLog (TOCTOU-safe) for stdout, bounded at MAX_REVIEW_JSON_BYTES");
   assert.match(slice, /readBoundedJobLog\(meta\.stderr_path,\s*undefined,\s*MAX_REVIEW_JSON_BYTES\)/,

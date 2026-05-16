@@ -94,8 +94,11 @@ test("v1.0.1 (issue #2): cmdImagine prints diagnostic when grok exits with empty
     "must print the argv the user can paste back into a shell");
   assert.match(r.stderr, /-p ["']?\/imagine a red apple["']?/,
     "argv print must include the actual slash-command + description");
-  assert.match(r.stderr, /possible bad auto-update/,
-    "diagnostic must mention the auto-update failure mode from issue #1");
+  // v1.0.5 (issue #9): banner rephrased from "possible bad auto-update"
+  // to a broader hypothesis: "binary may be broken, OR your prompt may
+  // have hit an upstream silent-abort path". Match either phrasing.
+  assert.match(r.stderr, /(possible bad auto-update|binary may be broken)/,
+    "diagnostic must mention the auto-update / broken-binary failure mode from issue #1");
   assert.match(r.stderr, /\/grok:setup/,
     "diagnostic must recommend running setup as recovery step 1");
   assert.match(r.stderr, /grok update/,

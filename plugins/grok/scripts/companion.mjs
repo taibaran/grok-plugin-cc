@@ -333,15 +333,27 @@ function shellQuoteArgv(argv) {
     return s;
   }).join(" ");
 }
+// v1.0.5 (issue #9): "empty for practical purposes". A 1-byte newline (the
+// silent-empty pattern observed on synthesis-style ~18KB prompts hitting an
+// upstream-grok abort path) is truthy in JS, so the original `!r.stdout`
+// check missed it. Treat whitespace-only output as anomalous too.
+function isWhitespaceOnly(s) {
+  if (s == null || s === "") return true;
+  return String(s).trim().length === 0;
+}
 function diagnoseEmptySpawnFailure({ args, status, label }) {
   const cmdStr = shellQuoteArgv(["grok", ...args]);
   process.stderr.write(
     `\n[grok-plugin] ${label}: grok exited ${status ?? "?"} with empty stdout and stderr.\n` +
     `[grok-plugin] Command: ${cmdStr}\n` +
-    `[grok-plugin] The grok binary may be broken (possible bad auto-update). Try:\n` +
+    `[grok-plugin] The grok binary may be broken, OR your prompt may have hit an upstream silent-abort path\n` +
+    `[grok-plugin] (observed on certain large synthesis-style prompts in 0.1.211 — see issue #9). Try:\n` +
     `[grok-plugin]   1. /grok:setup     — verify the binary is healthy\n` +
     `[grok-plugin]   2. grok update     — reinstall the latest version\n` +
-    `[grok-plugin]   3. ls ~/.grok/downloads/ && ln -sf ../downloads/<previous-binary> ~/.grok/bin/grok — roll back\n`
+    `[grok-plugin]   3. ls ~/.grok/downloads/ && ln -sf ../downloads/<previous-binary> ~/.grok/bin/grok — roll back\n` +
+    `[grok-plugin]   4. Re-run with --output-format=json to see the raw envelope (large prompts that look\n` +
+    `[grok-plugin]      like 'SAMPLE A: ... SAMPLE B: ... synthesize' may trigger the upstream abort —\n` +
+    `[grok-plugin]      wait for /grok:aggregate-of-n in v1.1.0 for a structurally safe version).\n`
   );
 }
 
@@ -430,7 +442,11 @@ function runHeadlessGrok({ args, timeoutMs, label, timeoutHint = "" }) {
   // gets no signal otherwise. Surface the exit code and the full argv so
   // they can either re-run manually or rule out a broken-binary case.
   // Exit code: preserve r.status semantics; the diagnostic is the signal.
-  if (!r.stdout && !r.stderr) {
+  // v1.0.5 (issue #9): tighten — a 1-byte newline ("\n") is truthy, so the
+  // original `!r.stdout` check missed grok's silent-empty case on large
+  // synthesis prompts (~18KB). Use trim().length to treat whitespace-only
+  // output as anomalous too.
+  if (isWhitespaceOnly(r.stdout) && isWhitespaceOnly(r.stderr)) {
     diagnoseEmptySpawnFailure({ args, status: r.status, label });
   }
   process.exit(r.status ?? 0);
@@ -697,7 +713,9 @@ function runJob({ args, meta, showStdout = true, timeoutMs = 0, cleanupPaths = [
         // v1.0.1 (issue #2): when both buffers are empty in a non-zero exit,
         // surface the argv + recovery hints so the user isn't left guessing.
         // Matches the same anomaly we diagnose in runHeadlessGrok/cmdImagine.
-        if (!outBuf && !errBuf) {
+        // v1.0.5 (issue #9): also fire when buffers are whitespace-only
+        // (a 1-byte newline was previously missed because "\n" is truthy).
+        if (isWhitespaceOnly(outBuf) && isWhitespaceOnly(errBuf)) {
           diagnoseEmptySpawnFailure({ args: meta.command.slice(1), status: code, label: `Job ${meta.id}` });
         }
       }
@@ -1122,7 +1140,10 @@ async function cmdImagine({ flags, positional }, { video }) {
     // v1.0.1 (issue #2): empty stdout + empty stderr is anomalous — the
     // broken-binary auto-update case from issue #1 hits exactly here. Print
     // the argv + recovery hints so the user has something actionable.
-    if (!r.stdout && !r.stderr) {
+    // v1.0.5 (issue #9): tighten to whitespace-only check (a 1-byte
+    // newline was missed; observed on upstream silent-empty for some
+    // synthesis-style large prompts).
+    if (isWhitespaceOnly(r.stdout) && isWhitespaceOnly(r.stderr)) {
       diagnoseEmptySpawnFailure({ args, status: r.status, label: video ? "imagine-video" : "imagine" });
     }
     process.exit(r.status ?? 1);

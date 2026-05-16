@@ -5,6 +5,103 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-05-16
+
+Diagnostic-tightening patch driven by issue #9, filed by external
+reviewer @eyalRonen1 while real-world-testing the v1.0.4 bash
+workaround from issue #8 (the deferred `--aggregate-of-n` stand-in).
+Triaged with the codex + gemini + grok multi-agent pipeline; **gemini
+nailed the root-cause hypothesis** in the first pass.
+
+### The bug
+
+The reporter followed the recommended bash workaround:
+1. Two parallel `grok --prompt-file research.txt --output-format=plain`
+   calls → 8KB + 9KB of legitimate Hebrew research output ✓
+2. Synthesis call: built `synth_prompt.txt` = header + sample_a +
+   sample_b + "Now produce the consolidated response." (~18KB total)
+3. `grok --prompt-file synth_prompt.txt --output-format=plain` →
+   **1 byte** of output (just a newline), exit 0, empty stderr.
+
+The plugin's v1.0.1 `diagnoseEmptySpawnFailure` was supposed to catch
+this class of silent failure, but the check was `if (!r.stdout &&
+!r.stderr)` — and `"\n"` is truthy in JS, so the 1-byte case slipped
+past it. Same upstream behavior would also reach the plugin via
+`/grok:research`, `/grok:ask`, and `/grok:imagine`, all of which hit
+the same fallback branch without firing the diagnostic.
+
+### Gemini's root-cause hypothesis
+
+The bash workaround inadvertently performs **prompt injection by tool-
+error patterns**: the parallel sample outputs contained `browser_tab
+failed` / `execution_failure` text (Grok recovering from tool errors
+via `web_search`), and those patterns LOOK LIKE grok's own internal
+tool-call meta-syntax. When concatenated into the synthesis prompt,
+the model's instruction parser likely treats them as live tool calls,
+triggers an early stop sequence, and cleanly aborts.
+
+A synthetic 28KB English test prompt with the same SAMPLE A / SAMPLE
+B structure (but WITHOUT the embedded tool-error patterns) produced
+815 bytes of legitimate synthesized output — confirming length isn't
+the trigger; the pattern is.
+
+### Fixed
+
+- **companion.mjs `isWhitespaceOnly()`**: new helper. Treats `null`,
+  `""`, and any string that trims to empty as "empty for diagnostic
+  purposes".
+- All three `diagnoseEmptySpawnFailure` call sites updated to use
+  `isWhitespaceOnly(...) && isWhitespaceOnly(...)` instead of
+  `!r.stdout && !r.stderr`:
+  - `runHeadlessGrok` (used by `/grok:ask`, `/grok:research`,
+    `/grok:models`, `/grok:best-of`, `/grok:inspect`)
+  - `cmdImagine` (used by `/grok:imagine`, `/grok:imagine-video`)
+  - `runJob` close handler (used by `/grok:rescue`, `/grok:task`,
+    long-running `/grok:review`)
+- Banner text expanded: in addition to the broken-binary recovery
+  hints (kept from v1.0.1), it now mentions the issue-#9 upstream
+  silent-abort path and points at the eventual `/grok:aggregate-of-n`
+  v1.1.0 fix.
+
+### Upstream
+
+Submitted to xAI via grok's built-in `/feedback` channel with the
+reproduction details and Gemini's hypothesis. Submission id:
+`94e62200-3fa5-495c-bf4a-e18b107a0b34` (session
+`019e30bc-0d61-77d0-8397-ba5e5be56ca2`). This is xAI's bug to fix
+at the model / API layer — the plugin can only surface it to the
+user, not prevent it.
+
+### Why we didn't ship `--aggregate-of-n` here
+
+Gemini argued for accelerating `--aggregate-of-n` to v1.0.5 (the
+native version would wrap each sample in `<sample>...</sample>` blocks
+and avoid the injection entirely). Decided to keep v1.0.5 small and
+focused — semver-honest patch release — and ship `--aggregate-of-n`
+in v1.1.0 as a real feature. Issue #9 stays open as the tracker for
+that feature.
+
+### Credit
+
+Thanks to @eyalRonen1 for real-world-testing the v1.0.4 bash
+workaround and surfacing both the upstream silent-abort path AND the
+detector gap in our v1.0.1 fix.
+
+### Tests
+
+- 6 new behavioral tests in `tests/v1-0-5-issue-9.test.mjs`:
+  - 1-byte newline triggers diagnostic via `/grok:ask` at both exit 0
+    and exit 1.
+  - Same triggering via `/grok:imagine` (cmdImagine path).
+  - Same triggering via `/grok:research` (runHeadlessGrok path with
+    subcommand label).
+  - Banner mentions the upstream silent-abort + aggregate-of-n future.
+  - Source-grep guard on `isWhitespaceOnly` + 3 call-site usages.
+- One v1.0.1 test relaxed: banner phrasing changed from "possible bad
+  auto-update" to "binary may be broken, OR ...synthesis...prompt..."
+  — test now matches either form.
+- Total: 386 tests (381 passing + 5 integration skipped).
+
 ## [1.0.4] - 2026-05-16
 
 Security + correctness patch driven by a deep-research review of

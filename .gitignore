@@ -12,3 +12,11 @@ build/
 
 # Ephemeral scheduling locks created by ScheduleWakeup
 .claude/scheduled_tasks.lock
+
+# v1.0.6: ad-hoc test fixtures from local bash repros for issues #9/#10.
+# These have snuck into release commits twice — gitignore prevents repeat.
+synth_prompt.txt
+synth.txt
+synth.err
+sample_a.txt
+sample_b.txt

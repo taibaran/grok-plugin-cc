@@ -3,12 +3,13 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](package.json)
 [![Release](https://img.shields.io/github/v/release/taibaran/grok-plugin-cc)](https://github.com/taibaran/grok-plugin-cc/releases)
-[![Tests](https://img.shields.io/badge/tests-339-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-405-brightgreen)](tests/)
 
-Run xAI's [Grok](https://x.ai/news/grok-build-cli) from inside a Claude Code
-session. Get a second-opinion code review, an adversarial pass that *tries* to
-break the design, or delegate a long-form research task to Grok — all without
-leaving the editor.
+Run xAI's [Grok](https://x.ai/news/grok-build-cli) from inside
+**Claude Code** *or* **OpenAI's Codex CLI** (`v1.1.0+`). Get a
+second-opinion code review, an adversarial pass that *tries* to
+break the design, or delegate a long-form research task to Grok —
+all without leaving the editor.
 
 ## Why this exists
 
@@ -36,7 +37,7 @@ curl -fsSL https://x.ai/cli/install.sh | bash
 grok login   # browser OAuth — or set GROK_CODE_XAI_API_KEY (from https://console.x.ai)
 ```
 
-Then add the plugin to Claude Code:
+### Install in Claude Code
 
 ```
 /plugin marketplace add https://github.com/taibaran/grok-plugin-cc
@@ -44,14 +45,49 @@ Then add the plugin to Claude Code:
 /grok:setup
 ```
 
-`/grok:setup` reports whether the local `grok` binary is reachable,
-authenticated, and exposes the flags this plugin depends on. After it
-prints `Grok plugin is ready.`, you can use any of the commands below.
+### Install in Codex CLI
 
-> **Note on the install URL.** Use the full HTTPS URL above, not the shorter
-> `<user>/<repo>` form. The shorter form defaults to SSH (`git@github.com:...`)
-> and fails with `Host key verification failed` unless you've already added
-> `github.com` to `~/.ssh/known_hosts`.
+```bash
+codex plugin marketplace add taibaran/grok-plugin-cc
+```
+
+(or, for a local checkout: `codex plugin marketplace add /path/to/grok-plugin-cc`)
+
+After install, ask Codex anything that benefits from Grok and the model will
+auto-route to the matching skill. Examples:
+
+- *"Ask grok what the current consensus is on X."* → `grok-ask` (live web search).
+- *"Research the latest state of Y and verify your claims."* → `grok-research`
+  (effort=max + `--check`).
+- *"Generate an image of Z."* → `grok-imagine`.
+- *"Delegate this multi-file refactor to grok."* → `grok-rescue` (read-only
+  by default; set `GROK_PLUGIN_ALLOW_WRITE=1` to allow edits).
+
+`/grok:setup` (Claude Code) or running the underlying companion script once
+in Codex confirms whether the local `grok` binary is reachable and
+authenticated. After it prints `Grok plugin is ready.`, you can use any of the
+surfaces below.
+
+> **Note on the CC install URL.** Use the full HTTPS URL shown above, not the
+> shorter `<user>/<repo>` form. The shorter form defaults to SSH
+> (`git@github.com:...`) and fails with `Host key verification failed` unless
+> you've already added `github.com` to `~/.ssh/known_hosts`.
+
+### Slash commands vs. skills
+
+Claude Code surfaces every operation as an explicit slash command
+(`/grok:ask`, `/grok:research`, etc. — full table below). Codex doesn't
+expose plugin slash commands; instead, the model auto-invokes the matching
+**skill** based on intent. Both surfaces shell out to the same
+`scripts/companion.mjs`, so behavior is identical regardless of host.
+
+| Operation | Claude Code slash command | Codex skill |
+|---|---|---|
+| One-off question | `/grok:ask` | `grok-ask` |
+| Deep research | `/grok:research` | `grok-research` |
+| Image generation | `/grok:imagine` | `grok-imagine` |
+| Long-form delegated task | `/grok:rescue` | `grok-rescue` |
+| Code review, best-of-N, aggregate-review, sessions, etc. | full table below | invoke via shell (see [`scripts/companion.mjs`](plugins/grok/scripts/companion.mjs) subcommands) |
 
 ## What you get
 

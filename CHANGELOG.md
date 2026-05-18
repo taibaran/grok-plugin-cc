@@ -5,6 +5,58 @@ All notable changes to **grok-plugin-cc** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-18
+
+**Codex CLI support — the plugin now installs in both Claude Code and OpenAI's
+Codex CLI from a single repo.** No changes to `companion.mjs` were needed:
+Codex sets `CLAUDE_PLUGIN_ROOT` for backward-compatibility with CC's plugin
+contract, so the existing commands/agents/hooks layout already runs inside
+Codex. v1.1.0 ships the manifest and skill metadata that make the plugin
+**discoverable** by Codex's marketplace + skill router.
+
+### Added
+
+- **`plugins/grok/.codex-plugin/plugin.json`** — native Codex plugin manifest
+  with `interface` block (displayName, category, capabilities, defaultPrompt)
+  so Codex's UI surfaces the plugin properly. The CC manifest at
+  `plugins/grok/.claude-plugin/plugin.json` is unchanged and remains the
+  source of truth for CC installs.
+- **`.agents/plugins/marketplace.json`** — Codex marketplace manifest at the
+  repo root. Users install with:
+  ```
+  codex plugin marketplace add taibaran/grok-plugin-cc
+  ```
+  or for a local checkout:
+  ```
+  codex plugin marketplace add /path/to/grok-plugin-cc
+  ```
+  The existing `.claude-plugin/marketplace.json` continues to serve CC
+  installs via `/plugin marketplace add taibaran/grok-plugin-cc`.
+- **Four user-facing skills** under `plugins/grok/skills/`, each with a model-
+  oriented `description:` that lets Codex's (and CC's) router auto-invoke
+  them at the right time. All four shell out to the same `companion.mjs`:
+  - `grok-ask/SKILL.md` — one-off questions with optional live web search.
+  - `grok-research/SKILL.md` — deep research (effort=max + web search + `--check`).
+  - `grok-imagine/SKILL.md` — image generation via Grok Imagine.
+  - `grok-rescue/SKILL.md` — long-form delegated tasks (read-only by default;
+    `--write` gated by `GROK_PLUGIN_ALLOW_WRITE=1`).
+- **README** Codex install section with the exact `codex plugin marketplace add`
+  command and a comparison table of what's exposed where (slash commands in
+  CC vs. model-invoked skills in Codex).
+
+### Notes
+
+- Existing CC users keep the full slash-command surface (`/grok:ask`,
+  `/grok:research`, `/grok:imagine`, `/grok:rescue`, `/grok:review`, etc.).
+  Slash commands are CC-specific; Codex users get equivalent functionality
+  via the auto-invoked skills above.
+- The internal-only skills (`grok-cli-runtime`, `grok-prompting`,
+  `grok-result-handling`) remain `user-invocable: false` and are used by
+  the `grok-rescue` subagent in CC. They are inert in Codex (no subagents),
+  which is harmless.
+- No behavior change to `companion.mjs`, hooks, or the existing slash
+  commands. v1.0.6 fixes carry forward.
+
 ## [1.0.6] - 2026-05-16
 
 Two-part patch for issue #10 (eyalRonen1): `companion.mjs task`
